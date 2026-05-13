@@ -5,6 +5,7 @@ import logging
 import pytest
 
 from app.models import Job
+from app.services.vision_client import VisionProcessResponse, VisionServiceError
 import app.worker.tasks as worker_tasks
 
 
@@ -38,7 +39,22 @@ def test_process_job_transitions_job_to_succeeded(
     original_update_job = worker_tasks._update_job
 
     monkeypatch.setattr(worker_tasks, "new_session", session_factory)
-    monkeypatch.setattr(worker_tasks.time, "sleep", lambda _: None)
+    monkeypatch.setattr(
+        worker_tasks,
+        "process_video_job",
+        lambda **_: VisionProcessResponse(
+            job_id=job.id,
+            status="succeeded",
+            csv_key=f"outputs/{job.id}/result.csv",
+            preview_key=f"outputs/{job.id}/preview.json",
+            crop_keys=[f"outputs/{job.id}/crops/crop_001.jpg"],
+            stats={
+                "detected_price_tags": 1,
+                "pipeline_name": "mock",
+                "pipeline_version": "0.1.0",
+            },
+        ),
+    )
 
     def track_updates(job_id: str, **changes: str | int | None) -> None:
         updates.append(changes.copy())
@@ -51,15 +67,21 @@ def test_process_job_transitions_job_to_succeeded(
     assert result == {"job_id": job.id, "status": "succeeded"}
     assert [update["status"] for update in updates] == [
         "running",
-        "running",
         "succeeded",
     ]
     assert [update["stage"] for update in updates] == [
-        "starting",
-        "processing",
+        "calling_vision_service",
         "completed",
     ]
     assert updates[-1]["progress"] == 100
+    assert updates[-1]["output_csv_key"] == f"outputs/{job.id}/result.csv"
+    assert updates[-1]["preview_json_key"] == f"outputs/{job.id}/preview.json"
+    assert updates[-1]["crop_keys_json"] == [f"outputs/{job.id}/crops/crop_001.jpg"]
+    assert updates[-1]["stats_json"] == {
+        "detected_price_tags": 1,
+        "pipeline_name": "mock",
+        "pipeline_version": "0.1.0",
+    }
 
     with session_factory() as session:
         refreshed_job = session.get(Job, job.id)
@@ -67,7 +89,15 @@ def test_process_job_transitions_job_to_succeeded(
         assert refreshed_job.status == "succeeded"
         assert refreshed_job.progress == 100
         assert refreshed_job.stage == "completed"
-        assert refreshed_job.message == "Job completed successfully."
+        assert refreshed_job.message == "Vision pipeline completed"
+        assert refreshed_job.output_csv_key == f"outputs/{job.id}/result.csv"
+        assert refreshed_job.preview_json_key == f"outputs/{job.id}/preview.json"
+        assert refreshed_job.crop_keys_json == [f"outputs/{job.id}/crops/crop_001.jpg"]
+        assert refreshed_job.stats_json == {
+            "detected_price_tags": 1,
+            "pipeline_name": "mock",
+            "pipeline_version": "0.1.0",
+        }
 
 
 def test_process_job_logs_missing_job_failure(
@@ -76,7 +106,6 @@ def test_process_job_logs_missing_job_failure(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(worker_tasks, "new_session", session_factory)
-    monkeypatch.setattr(worker_tasks.time, "sleep", lambda _: None)
     caplog.set_level(logging.ERROR, logger="price-tag-vision.worker.tasks")
 
     with pytest.raises(RuntimeError, match="missing-job"):
@@ -84,3 +113,31 @@ def test_process_job_logs_missing_job_failure(
 
     assert "Job missing-job failed." in caplog.text
     assert "Failed to persist failure state for job missing-job." in caplog.text
+
+
+def test_process_job_marks_job_failed_when_vision_service_errors(
+    session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job = _create_job(session_factory, id="job-worker-failed")
+
+    monkeypatch.setattr(worker_tasks, "new_session", session_factory)
+    monkeypatch.setattr(
+        worker_tasks,
+        "process_video_job",
+        lambda **_: (_ for _ in ()).throw(
+            VisionServiceError("Vision service unavailable.")
+        ),
+    )
+
+    with pytest.raises(VisionServiceError, match="Vision service unavailable."):
+        worker_tasks.process_job(job.id)
+
+    with session_factory() as session:
+        refreshed_job = session.get(Job, job.id)
+        assert refreshed_job is not None
+        assert refreshed_job.status == "failed"
+        assert refreshed_job.stage == "failed"
+        assert refreshed_job.message == "Job failed during worker execution."
+        assert refreshed_job.error == "Vision service unavailable."
+        assert refreshed_job.progress == 10

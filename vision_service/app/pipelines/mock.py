@@ -70,7 +70,9 @@ def build_mock_artifacts(
 
     return MockArtifacts(
         csv_bytes=csv_buffer.getvalue().encode("utf-8"),
-        preview_bytes=json.dumps(preview_payload, ensure_ascii=False, indent=2).encode("utf-8"),
+        preview_bytes=json.dumps(preview_payload, ensure_ascii=False, indent=2).encode(
+            "utf-8"
+        ),
         crop_bytes=crop_buffer.getvalue(),
         stats=stats,
     )

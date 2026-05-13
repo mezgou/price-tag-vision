@@ -52,7 +52,10 @@ def root() -> dict[str, str]:
 def health() -> JSONResponse:
     try:
         storage.ensure_bucket()
-    except (BotoCoreError, ClientError) as exc:  # pragma: no cover - defensive runtime check
+    except (
+        BotoCoreError,
+        ClientError,
+    ) as exc:  # pragma: no cover - defensive runtime check
         return JSONResponse(
             {
                 "service": "vision-service",

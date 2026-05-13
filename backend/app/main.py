@@ -9,7 +9,12 @@ from fastapi.responses import JSONResponse
 from app.api import jobs_router
 from app.core.config import get_settings
 from app.db import init_db
-from app.services.status import build_core_status, build_payload, build_system_status, is_healthy
+from app.services.status import (
+    build_core_status,
+    build_payload,
+    build_system_status,
+    is_healthy,
+)
 
 settings = get_settings()
 

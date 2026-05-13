@@ -15,7 +15,9 @@ from redis.exceptions import RedisError
 from app.core.config import Settings
 
 
-def build_payload(service_name: str, services: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def build_payload(
+    service_name: str, services: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
     return {
         "service": service_name,
         "status": "ok" if is_healthy(services) else "degraded",
@@ -76,7 +78,10 @@ def check_minio(settings: Settings) -> dict[str, Any]:
             config=Config(signature_version="s3v4"),
         )
         client.head_bucket(Bucket=settings.s3_bucket)
-    except (BotoCoreError, ClientError) as exc:  # pragma: no cover - defensive runtime check
+    except (
+        BotoCoreError,
+        ClientError,
+    ) as exc:  # pragma: no cover - defensive runtime check
         return _status("error", f"MinIO bucket check failed: {exc}")
     return _status("ok", f"Bucket '{settings.s3_bucket}' is available.")
 

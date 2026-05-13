@@ -16,12 +16,21 @@ class Settings(BaseSettings):
     database_url: str
     redis_url: str
     s3_endpoint_url: str
+    s3_public_endpoint_url: str | None = None
     s3_access_key_id: str
     s3_secret_access_key: str
     s3_bucket: str = "artifacts"
     vision_service_url: str = Field(
         default="http://vision-service:9001",
         validation_alias=AliasChoices("VISION_SERVICE_URL", "ML_SERVICE_URL"),
+    )
+    pipeline_name: str = Field(
+        default="mock",
+        validation_alias=AliasChoices("PIPELINE_NAME"),
+    )
+    pipeline_version: str = Field(
+        default="0.1.0",
+        validation_alias=AliasChoices("PIPELINE_VERSION"),
     )
     backend_cors_origins: str = ""
     queue_name: str = "jobs"

@@ -33,7 +33,9 @@ def wait_for_dependencies(redis_client: Redis, vision_service_url: str) -> None:
             time.sleep(2)
 
 
-def publish_heartbeat(redis_client: Redis, heartbeat_key: str, ttl_seconds: int) -> None:
+def publish_heartbeat(
+    redis_client: Redis, heartbeat_key: str, ttl_seconds: int
+) -> None:
     while True:
         try:
             redis_client.set(heartbeat_key, str(time.time()), ex=ttl_seconds * 2)
