@@ -1,0 +1,8 @@
+# Directories
+.venv/
+.idea/
+.vscode/
+data/
+artifacts/
+
+# Files
