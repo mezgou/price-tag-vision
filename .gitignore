@@ -1,8 +1,14 @@
 # Directories
 .venv/
+**/.venv/
 .idea/
 .vscode/
 data/
 artifacts/
+docs/
+frontend/node_modules/
+frontend/dist/
+**/__pycache__/
 
 # Files
+.env
