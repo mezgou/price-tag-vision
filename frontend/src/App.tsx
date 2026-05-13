@@ -1,20 +1,35 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import './App.css'
+import { API_BASE_URL, apiClient, getApiErrorMessage } from './api/client'
+import {
+  createJob,
+  getCsvDownloadUrl,
+  getJob,
+  getJobCrops,
+  getJobPreview,
+} from './api/jobs'
+import { CropGallery } from './components/CropGallery'
+import { JobStatusCard } from './components/JobStatusCard'
+import { PreviewTable } from './components/PreviewTable'
+import { UploadDropzone } from './components/UploadDropzone'
+import type { Job, JobCrop, PreviewPayload } from './types/job'
 
 type ServiceStatus = {
-  status: string
-  detail: string
   checked_at: string
+  detail: string
+  status: string
 }
 
 type StatusPayload = {
-  service: string
-  status: string
   checked_at: string
+  service: string
   services: Record<string, ServiceStatus>
+  status: string
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
+const POLL_INTERVAL_MS = 1_500
+
+const TERMINAL_JOB_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
 
 const serviceMeta = [
   { key: 'frontend', label: 'Frontend', href: window.location.origin },
@@ -27,149 +42,396 @@ const serviceMeta = [
 ] as const
 
 function App() {
-  const [status, setStatus] = useState<StatusPayload | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [job, setJob] = useState<Job | null>(null)
+  const [preview, setPreview] = useState<PreviewPayload | null>(null)
+  const [crops, setCrops] = useState<JobCrop[]>([])
+  const [isUploading, setIsUploading] = useState(false)
+  const [isArtifactsLoading, setIsArtifactsLoading] = useState(false)
+  const [uploadError, setUploadError] = useState<string | null>(null)
+  const [resumeError, setResumeError] = useState<string | null>(null)
+  const [jobRefreshError, setJobRefreshError] = useState<string | null>(null)
+  const [artifactError, setArtifactError] = useState<string | null>(null)
+  const [systemStatus, setSystemStatus] = useState<StatusPayload | null>(null)
+  const [systemError, setSystemError] = useState<string | null>(null)
+
+  const initialJobId = new URLSearchParams(window.location.search).get('jobId')
+  const jobId = job?.id ?? null
+  const jobStatus = job?.status ?? null
+  const isPolling = job ? !TERMINAL_JOB_STATUSES.has(job.status) : false
+  const csvDownloadUrl =
+    job && job.status === 'succeeded' ? getCsvDownloadUrl(job.id) : null
 
   useEffect(() => {
-    let active = true
+    if (!initialJobId) {
+      return
+    }
 
-    const loadStatus = async () => {
+    let isCancelled = false
+
+    const restoreJob = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/system/status`)
-        const payload = (await response.json()) as StatusPayload
-
-        if (!active) {
+        const existingJob = await getJob(initialJobId)
+        if (isCancelled) {
           return
         }
 
-        setStatus(payload)
-        setError(response.ok ? null : 'One or more services are still unhealthy.')
-      } catch (requestError) {
-        if (!active) {
+        setJob(existingJob)
+        setResumeError(null)
+      } catch (error) {
+        if (isCancelled) {
           return
         }
 
-        setError(
-          requestError instanceof Error
-            ? requestError.message
-            : 'Status request failed.',
+        setResumeError(
+          getApiErrorMessage(error, 'Failed to restore job from the URL.'),
         )
       }
     }
 
-    loadStatus()
-    const intervalId = window.setInterval(loadStatus, 5000)
+    void restoreJob()
 
     return () => {
-      active = false
+      isCancelled = true
+    }
+  }, [initialJobId])
+
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    if (jobId) {
+      url.searchParams.set('jobId', jobId)
+    } else {
+      url.searchParams.delete('jobId')
+    }
+
+    const nextUrl = `${url.pathname}${url.search}${url.hash}`
+    window.history.replaceState({}, '', nextUrl)
+  }, [jobId])
+
+  useEffect(() => {
+    let isCancelled = false
+
+    const loadSystemStatus = async () => {
+      try {
+        const response = await apiClient.get<StatusPayload>('/api/system/status', {
+          validateStatus: () => true,
+        })
+
+        if (isCancelled) {
+          return
+        }
+
+        setSystemStatus(response.data)
+        setSystemError(
+          response.status >= 400
+            ? 'One or more services are still unhealthy.'
+            : null,
+        )
+      } catch (error) {
+        if (isCancelled) {
+          return
+        }
+
+        setSystemError(
+          getApiErrorMessage(error, 'System status request failed.'),
+        )
+      }
+    }
+
+    void loadSystemStatus()
+    const intervalId = window.setInterval(() => {
+      void loadSystemStatus()
+    }, 10_000)
+
+    return () => {
+      isCancelled = true
       window.clearInterval(intervalId)
     }
   }, [])
 
-  const services = useMemo(() => {
-    const frontendStatus: ServiceStatus = {
-      status: 'ok',
-      detail: 'Vite frontend is responding in the browser.',
-      checked_at: new Date().toISOString(),
+  useEffect(() => {
+    if (!jobId || (jobStatus && TERMINAL_JOB_STATUSES.has(jobStatus))) {
+      return
     }
 
-    return serviceMeta.map((service) => ({
-      ...service,
-      status:
-        service.key === 'frontend'
-          ? frontendStatus
-          : status?.services[service.key] ?? {
-              status: 'unknown',
-              detail: 'No status received yet.',
-              checked_at: '',
-            },
-    }))
-  }, [status])
+    let isCancelled = false
 
-  const headline =
-    status?.status === 'ok'
-      ? 'Foundation is up'
-      : 'Foundation is still converging'
+    const pollJob = async () => {
+      try {
+        const nextJob = await getJob(jobId)
+        if (isCancelled) {
+          return
+        }
+
+        setJob(nextJob)
+        setJobRefreshError(null)
+      } catch (error) {
+        if (isCancelled) {
+          return
+        }
+
+        setJobRefreshError(
+          getApiErrorMessage(error, 'Failed to refresh job status.'),
+        )
+      }
+    }
+
+    void pollJob()
+    const intervalId = window.setInterval(() => {
+      void pollJob()
+    }, POLL_INTERVAL_MS)
+
+    return () => {
+      isCancelled = true
+      window.clearInterval(intervalId)
+    }
+  }, [jobId, jobStatus])
+
+  useEffect(() => {
+    if (!jobId || jobStatus !== 'succeeded') {
+      return
+    }
+
+    let isCancelled = false
+
+    const loadArtifacts = async () => {
+      setIsArtifactsLoading(true)
+        setArtifactError(null)
+
+      const [previewResult, cropsResult] = await Promise.allSettled([
+        getJobPreview(jobId),
+        getJobCrops(jobId),
+      ])
+
+      if (isCancelled) {
+        return
+      }
+
+      const nextErrors: string[] = []
+
+      if (previewResult.status === 'fulfilled') {
+        setPreview(previewResult.value)
+      } else {
+        setPreview(null)
+        nextErrors.push(
+          `Preview: ${getApiErrorMessage(
+            previewResult.reason,
+            'Failed to load preview.',
+          )}`,
+        )
+      }
+
+      if (cropsResult.status === 'fulfilled') {
+        setCrops(cropsResult.value)
+      } else {
+        setCrops([])
+        nextErrors.push(
+          `Crops: ${getApiErrorMessage(
+            cropsResult.reason,
+            'Failed to load crop images.',
+          )}`,
+        )
+      }
+
+      setArtifactError(nextErrors.length > 0 ? nextErrors.join(' ') : null)
+      setIsArtifactsLoading(false)
+    }
+
+    void loadArtifacts()
+
+    return () => {
+      isCancelled = true
+    }
+  }, [jobId, jobStatus])
+
+  async function handleUpload(file: File) {
+    setIsUploading(true)
+    setUploadError(null)
+    setResumeError(null)
+    setJobRefreshError(null)
+    setArtifactError(null)
+    setIsArtifactsLoading(false)
+    setPreview(null)
+    setCrops([])
+    setJob(null)
+
+    try {
+      const createdJob = await createJob(file)
+      setJob(createdJob)
+    } catch (error) {
+      setUploadError(getApiErrorMessage(error, 'Failed to create job.'))
+    } finally {
+      setIsUploading(false)
+    }
+  }
+
+  const frontendStatus: ServiceStatus = {
+    checked_at: new Date().toISOString(),
+    detail: 'Vite frontend is rendering in the browser.',
+    status: 'ok',
+  }
+
+  const services = serviceMeta.map((service) => ({
+    ...service,
+    status:
+      service.key === 'frontend'
+        ? frontendStatus
+        : systemStatus?.services[service.key] ?? {
+            checked_at: '',
+            detail: 'No system status received yet.',
+            status: 'unknown',
+          },
+  }))
 
   return (
-    <main className="page-shell">
+    <main className="app-shell">
       <section className="hero-panel">
-        <p className="eyebrow">price-tag-vision / docker foundation</p>
-        <h1>{headline}</h1>
-        <p className="summary">
-          Minimal baseline for the hackathon stack: backend, worker, vision
-          service, queue, storage and database are wired together and report
-          their health from one place.
-        </p>
+        <div className="hero-top">
+          <div>
+            <p className="eyebrow">price-tag-vision / minimal job flow</p>
+            <h1>Upload a shelf video and watch the job complete.</h1>
+            <p className="summary">
+              This frontend keeps the MVP deliberately small: upload one video,
+              poll the job status, inspect the mock preview, review crop images,
+              and download the CSV result.
+            </p>
+          </div>
+          <div className="signature-badge">made by Козырный Бутерброд</div>
+        </div>
+
         <div className="summary-meta">
-          <span>API: {API_BASE_URL}</span>
-          <span>
-            Last check:{' '}
-            {status?.checked_at
-              ? new Date(status.checked_at).toLocaleTimeString()
-              : 'pending'}
+          <span>API base URL: {API_BASE_URL}</span>
+          <span>Polling: {POLL_INTERVAL_MS / 1000}s</span>
+        </div>
+
+        <UploadDropzone isUploading={isUploading} onUpload={handleUpload} />
+        {uploadError ? <div className="banner banner-error">{uploadError}</div> : null}
+        {resumeError ? <div className="banner banner-warning">{resumeError}</div> : null}
+      </section>
+
+      {job ? (
+        <JobStatusCard
+          csvDownloadUrl={csvDownloadUrl}
+          isPolling={isPolling}
+          job={job}
+          refreshError={jobRefreshError}
+        />
+      ) : (
+        <section className="panel empty-panel">
+          <p className="eyebrow">Current Job</p>
+          <h2>No job yet</h2>
+          <p className="empty-copy">
+            Upload an MP4 to create a backend job and start polling its status.
+          </p>
+        </section>
+      )}
+
+      <section className="results-grid">
+        <section className="panel result-panel">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Preview</p>
+              <h2>Result preview</h2>
+            </div>
+          </div>
+
+          {job?.status === 'succeeded' ? (
+            <>
+              {artifactError ? (
+                <div className="banner banner-warning">{artifactError}</div>
+              ) : null}
+              {isArtifactsLoading && preview === null ? (
+                <p className="empty-copy">Loading preview artifact...</p>
+              ) : preview !== null ? (
+                <PreviewTable preview={preview} />
+              ) : (
+                <p className="empty-copy">No preview payload was returned.</p>
+              )}
+            </>
+          ) : (
+            <p className="empty-copy">
+              Preview appears here after the job reaches <strong>succeeded</strong>.
+            </p>
+          )}
+        </section>
+
+        <section className="panel result-panel">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Crops</p>
+              <h2>Detected crop images</h2>
+            </div>
+          </div>
+
+          {job?.status === 'succeeded' ? (
+            isArtifactsLoading && crops.length === 0 ? (
+              <p className="empty-copy">Loading crop images...</p>
+            ) : (
+              <CropGallery crops={crops} />
+            )
+          ) : (
+            <p className="empty-copy">
+              Crop images appear here after the worker writes output artifacts.
+            </p>
+          )}
+        </section>
+      </section>
+
+      <section className="panel system-panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">System Status</p>
+            <h2>Foundation block</h2>
+          </div>
+          <span className={`status-chip status-${systemStatus?.status ?? 'unknown'}`}>
+            {systemStatus?.status ?? 'pending'}
           </span>
         </div>
-        {error ? <div className="status-banner warning">{error}</div> : null}
-      </section>
 
-      <section className="services-grid">
-        {services.map((service) => (
-          <article
-            key={service.key}
-            className={`service-card status-${service.status.status}`}
-          >
-            <div className="service-head">
-              <div>
-                <p className="service-label">{service.label}</p>
-                <h2>{service.status.status}</h2>
-              </div>
-              <span className="service-dot" aria-hidden="true"></span>
-            </div>
-            <p className="service-detail">{service.status.detail}</p>
-            <div className="service-foot">
-              <span>
-                {service.status.checked_at
-                  ? new Date(service.status.checked_at).toLocaleTimeString()
-                  : 'waiting'}
-              </span>
-              {service.href ? (
-                <a href={service.href} target="_blank" rel="noreferrer">
-                  Open
-                </a>
-              ) : (
-                <span>internal</span>
-              )}
-            </div>
-          </article>
-        ))}
-      </section>
+        <p className="system-copy">
+          The previous dashboard is preserved as a compact diagnostic block so
+          upload issues can still be correlated with backend, worker, storage or
+          queue health.
+        </p>
 
-      <section className="endpoints-panel">
-        <div>
-          <p className="eyebrow">useful endpoints</p>
-          <ul className="endpoint-list">
-            <li>
-              <code>{API_BASE_URL}/health</code>
-            </li>
-            <li>
-              <code>{API_BASE_URL}/api/system/status</code>
-            </li>
-            <li>
-              <code>http://localhost:9001/health</code>
-            </li>
-            <li>
-              <code>http://localhost:9002</code>
-            </li>
-          </ul>
+        <div className="summary-meta">
+          <span>
+            Last check:{' '}
+            {systemStatus?.checked_at
+              ? new Date(systemStatus.checked_at).toLocaleTimeString()
+              : 'pending'}
+          </span>
+          <span>{API_BASE_URL}/api/system/status</span>
         </div>
-        <div>
-          <p className="eyebrow">next step</p>
-          <p className="next-step-copy">
-            This baseline is intentionally narrow: after the stack is healthy,
-            you can add job lifecycle, upload flow and the real CV/OCR pipeline
-            without rewriting the container topology.
-          </p>
+
+        {systemError ? <div className="banner banner-warning">{systemError}</div> : null}
+
+        <div className="service-grid">
+          {services.map((service) => (
+            <article key={service.key} className={`service-card status-${service.status.status}`}>
+              <div className="service-head">
+                <div>
+                  <p className="service-label">{service.label}</p>
+                  <h3>{service.status.status}</h3>
+                </div>
+                <span className="service-dot" aria-hidden="true"></span>
+              </div>
+              <p className="service-detail">{service.status.detail}</p>
+              <div className="service-foot">
+                <span>
+                  {service.status.checked_at
+                    ? new Date(service.status.checked_at).toLocaleTimeString()
+                    : 'waiting'}
+                </span>
+                {service.href ? (
+                  <a href={service.href} rel="noreferrer" target="_blank">
+                    Open
+                  </a>
+                ) : (
+                  <span>internal</span>
+                )}
+              </div>
+            </article>
+          ))}
         </div>
       </section>
     </main>
