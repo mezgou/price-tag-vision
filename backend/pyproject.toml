@@ -18,3 +18,9 @@ dependencies = [
     "sse-starlette>=3.4.4",
     "uvicorn>=0.46.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "ruff>=0.15.12",
+]
