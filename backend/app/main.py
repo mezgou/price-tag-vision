@@ -1,19 +1,31 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api import jobs_router
 from app.core.config import get_settings
+from app.db import init_db
 from app.services.status import build_core_status, build_payload, build_system_status, is_healthy
 
 settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_db()
+    yield
+
 
 app = FastAPI(
     title="Price Tag Vision Backend",
     version="0.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 if settings.cors_origins:
@@ -24,6 +36,8 @@ if settings.cors_origins:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+app.include_router(jobs_router)
 
 
 @app.get("/")

@@ -44,7 +44,7 @@ def publish_heartbeat(redis_client: Redis, heartbeat_key: str, ttl_seconds: int)
 
 def main() -> None:
     settings = get_settings()
-    redis_client = Redis.from_url(settings.redis_url, decode_responses=True)
+    redis_client = Redis.from_url(settings.redis_url)
     worker = Worker([settings.queue_name], connection=redis_client)
     heartbeat_key = f"{settings.worker_heartbeat_prefix}:{worker.name}"
 
