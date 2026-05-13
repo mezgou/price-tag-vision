@@ -1,9 +1,17 @@
-.git
-.venv
-**/.venv
-**/__pycache__
-artifacts
-data
-docs
-frontend/node_modules
-frontend/dist
+# Directories
+.git/
+.venv/
+**/.venv/
+.idea/
+.vscode/
+data/
+artifacts/
+docs/
+frontend/node_modules/
+frontend/dist/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+
+# Files
+.env

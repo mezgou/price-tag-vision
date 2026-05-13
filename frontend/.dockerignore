@@ -1,2 +1,11 @@
-node_modules
-dist
+# Directories
+node_modules/
+dist/
+.idea/
+.vscode/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+
+# Files
+.env
