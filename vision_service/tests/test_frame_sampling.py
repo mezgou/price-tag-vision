@@ -32,6 +32,8 @@ def test_frame_sampling_stage_returns_sampled_frame_metadata(
     assert pipeline_context.frames_processed == 2
     assert len(pipeline_context.sampled_frames) == 2
     assert len(pipeline_context.debug_frame_keys) == 2
+    assert pipeline_context.sampled_frames[0].local_frame_path is not None
+    assert pipeline_context.sampled_frames[0].local_frame_path.exists()
     assert pipeline_context.sampled_frames[0].to_dict() == {
         "frame_index": 0,
         "timestamp_ms": 0,

@@ -40,6 +40,12 @@ def test_debug_manifest_contains_expected_structure(
     assert isinstance(manifest["stats"], dict)
     assert isinstance(manifest["errors"], list)
     assert isinstance(manifest["warnings"], list)
+    assert manifest["stats"]["debug_overlays_count"] == 0
+    assert manifest["stats"]["debug_crops_count"] == 0
+    assert manifest["stats"]["detections_by_frame_count"] == 0
+    assert manifest["stats"]["crops_total"] == 0
+    assert manifest["stats"]["decode_attempts_total"] == 0
+    assert manifest["stats"]["decoded_symbols_total"] == 0
     assert manifest["stages"][0]["name"] == "FrameMetadataStage"
     assert manifest["stages"][-1]["name"] == "DebugManifestStage"
     assert isinstance(manifest["stages"][-1]["warnings"], list)

@@ -6,6 +6,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from app.schemas.detections import (
+    CropCandidate,
+    DecodeAttempt,
+    DecodedSymbol,
+    DetectionCandidate,
+)
+from app.utils.decoding import build_payload_preview
 from app.utils.artifacts import ArtifactWriter
 from app.utils.timing import utc_now
 
@@ -78,6 +85,7 @@ class SampledFrameMetadata:
     processed_height: int
     orientation_applied: str
     debug_frame_key: str | None = None
+    local_frame_path: Path | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -105,10 +113,15 @@ class PipelineContext:
     artifact_writer: ArtifactWriter
     video_metadata: VideoMetadata
     artifacts: dict[str, Any] = field(default_factory=dict)
-    detections: list[dict[str, Any]] = field(default_factory=list)
+    detections: list[DetectionCandidate] = field(default_factory=list)
+    crop_candidates: list[CropCandidate] = field(default_factory=list)
+    decode_attempts: list[DecodeAttempt] = field(default_factory=list)
+    decoded_symbols: list[DecodedSymbol] = field(default_factory=list)
     csv_rows: list[dict[str, str]] = field(default_factory=list)
     sampled_frames: list[SampledFrameMetadata] = field(default_factory=list)
     debug_frame_keys: list[str] = field(default_factory=list)
+    debug_overlay_keys: list[str] = field(default_factory=list)
+    debug_crop_keys: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[dict[str, Any]] = field(default_factory=list)
     stage_reports: list[StageExecution] = field(default_factory=list)
@@ -141,6 +154,62 @@ class PipelineContext:
             "warnings": self.warnings,
         }
 
+    def detections_by_frame(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for detection in self.detections:
+            key = str(detection.frame_index)
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    def serialize_detections(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        detections = self.detections if limit is None else self.detections[:limit]
+        return [detection.model_dump() for detection in detections]
+
+    def serialize_crops(
+        self,
+        *,
+        limit: int | None = None,
+        sort_by_quality: bool = False,
+    ) -> list[dict[str, Any]]:
+        crops = list(self.crop_candidates)
+        if sort_by_quality:
+            crops.sort(key=lambda crop: crop.quality.score, reverse=True)
+        if limit is not None:
+            crops = crops[:limit]
+        return [crop.model_dump() for crop in crops]
+
+    def decoded_symbols_by_type(self) -> dict[str, int]:
+        counts = {"qr": 0, "barcode": 0, "unknown": 0}
+        for symbol in self.decoded_symbols:
+            counts[symbol.symbol_type] = counts.get(symbol.symbol_type, 0) + 1
+        return counts
+
+    def serialize_decoded_symbols_preview(
+        self,
+        *,
+        limit: int | None = None,
+        max_payload_preview_length: int,
+    ) -> list[dict[str, Any]]:
+        symbols = self.decoded_symbols if limit is None else self.decoded_symbols[:limit]
+        return [
+            {
+                "symbol_id": symbol.symbol_id,
+                "crop_id": symbol.crop_id,
+                "detection_id": symbol.detection_id,
+                "frame_index": symbol.frame_index,
+                "timestamp_ms": symbol.timestamp_ms,
+                "symbol_type": symbol.symbol_type,
+                "decoder": symbol.decoder,
+                "variant": symbol.variant,
+                "payload_preview": build_payload_preview(
+                    symbol.payload,
+                    max_length=max_payload_preview_length,
+                ),
+                "confidence": symbol.confidence,
+            }
+            for symbol in symbols
+        ]
+
     def build_stats(self) -> dict[str, Any]:
         duration_ms = 0
         if self.finished_at is not None:
@@ -155,8 +224,16 @@ class PipelineContext:
             "frames_processed": self.frames_processed,
             "sampled_frames_count": len(self.sampled_frames),
             "debug_frames_count": len(self.debug_frame_keys),
+            "debug_overlays_count": len(self.debug_overlay_keys),
+            "debug_crops_count": len(self.debug_crop_keys),
             "frame_count": self.video_metadata.frame_count or 0,
             "detections_total": len(self.detections),
+            "detections_by_frame_count": len(self.detections_by_frame()),
+            "crops_total": len(self.crop_candidates),
+            "decode_attempts_total": len(self.decode_attempts),
+            "decoded_symbols_total": len(self.decoded_symbols),
+            "decoded_qr_total": self.decoded_symbols_by_type()["qr"],
+            "decoded_barcode_total": self.decoded_symbols_by_type()["barcode"],
             "final_rows": len(self.csv_rows),
             "duration_ms": duration_ms,
         }

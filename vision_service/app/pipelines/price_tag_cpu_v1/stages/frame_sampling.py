@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -18,6 +19,7 @@ from app.pipelines.price_tag_cpu_v1.orientation import (
     apply_orientation,
     resolve_orientation_mode,
 )
+from app.utils.image_processing import resize_to_max_width
 
 FrameArray = NDArray[np.uint8]
 DEFAULT_DEBUG_MAX_WIDTH = 1280
@@ -189,9 +191,18 @@ class FrameSamplingStage(BaseStage):
     ) -> tuple[SampledFrameMetadata, str | None]:
         original_height, original_width = frame.shape[:2]
         oriented_frame = apply_orientation(frame, config.orientation_mode)
-        processed_frame = _resize_for_debug(oriented_frame, max_width=DEFAULT_DEBUG_MAX_WIDTH)
+        processed_frame = resize_to_max_width(
+            oriented_frame,
+            max_width=DEFAULT_DEBUG_MAX_WIDTH,
+        )
         processed_height, processed_width = processed_frame.shape[:2]
 
+        local_frame_path = _write_runtime_frame(
+            context=context,
+            frame=processed_frame,
+            sequence_number=sequence_number,
+            jpeg_quality=config.debug_jpeg_quality,
+        )
         debug_frame_key: str | None = None
         if config.debug_save_frames:
             debug_frame_key = _upload_debug_frame(
@@ -210,6 +221,7 @@ class FrameSamplingStage(BaseStage):
             processed_height=processed_height,
             orientation_applied=config.orientation_mode,
             debug_frame_key=debug_frame_key,
+            local_frame_path=local_frame_path,
         )
         return metadata, debug_frame_key
 
@@ -239,14 +251,28 @@ def _upload_debug_frame(
     )
 
 
-def _resize_for_debug(frame: FrameArray, *, max_width: int) -> FrameArray:
-    height, width = frame.shape[:2]
-    if width <= max_width:
-        return frame
+def _write_runtime_frame(
+    *,
+    context: PipelineContext,
+    frame: FrameArray,
+    sequence_number: int,
+    jpeg_quality: int,
+) -> Path:
+    success, encoded = cv2.imencode(
+        ".jpg",
+        frame,
+        [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality],
+    )
+    if not success:
+        raise RuntimeError(
+            f"Failed to encode sampled frame {sequence_number} for runtime storage."
+        )
 
-    scale = max_width / float(width)
-    resized_height = max(int(round(height * scale)), 1)
-    return cv2.resize(frame, (max_width, resized_height), interpolation=cv2.INTER_AREA)
+    runtime_dir = context.work_dir / "runtime" / "sampled_frames"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    destination = runtime_dir / f"frame_{sequence_number:06d}.jpg"
+    destination.write_bytes(encoded.tobytes())
+    return destination
 
 
 def _resolve_sample_interval(*, source_fps: float | None, sample_fps: float) -> int:

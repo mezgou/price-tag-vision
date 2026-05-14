@@ -90,6 +90,8 @@ def pipeline_context(
             "manifest_key": artifact_writer.manifest_key,
             "crop_keys": [],
             "debug_frame_keys": [],
+            "debug_overlay_keys": [],
+            "debug_crop_keys": [],
         },
     )
 

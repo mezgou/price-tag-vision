@@ -17,11 +17,13 @@ from app.pipelines.base import (
     VideoMetadata,
 )
 from app.pipelines.price_tag_cpu_v1.stages import (
+    BarcodeQrDecodeStage,
+    CropExtractionStage,
     CsvWriterStage,
     DebugManifestStage,
-    EmptyDetectionsStage,
     FrameMetadataStage,
     FrameSamplingStage,
+    HeuristicCandidateDetectionStage,
     PreviewWriterStage,
 )
 from app.schemas.pipeline import ProcessRequest, ProcessResponse
@@ -40,7 +42,9 @@ class PriceTagCpuV1Pipeline(BasePipeline):
         self._stages: list[BaseStage] = [
             FrameMetadataStage(),
             FrameSamplingStage(),
-            EmptyDetectionsStage(),
+            HeuristicCandidateDetectionStage(),
+            CropExtractionStage(),
+            BarcodeQrDecodeStage(),
             CsvWriterStage(),
             PreviewWriterStage(),
             DebugManifestStage(),
@@ -78,6 +82,8 @@ class PriceTagCpuV1Pipeline(BasePipeline):
                     "manifest_key": f"outputs/{request.job_id}/debug/pipeline_manifest.json",
                     "crop_keys": [],
                     "debug_frame_keys": [],
+                    "debug_overlay_keys": [],
+                    "debug_crop_keys": [],
                 },
             )
 

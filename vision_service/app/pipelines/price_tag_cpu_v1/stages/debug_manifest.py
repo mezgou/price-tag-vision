@@ -16,6 +16,10 @@ class DebugManifestStage(BaseStage):
             "warnings_count": len(context.warnings),
             "frames_processed": context.frames_processed,
             "sampled_frames_count": len(context.sampled_frames),
+            "detections_count": len(context.detections),
+            "crops_count": len(context.crop_candidates),
+            "decode_attempts_count": len(context.decode_attempts),
+            "decoded_symbols_count": len(context.decoded_symbols),
         }
 
     def run(self, context: PipelineContext) -> StageOutcome:
@@ -29,6 +33,12 @@ class DebugManifestStage(BaseStage):
                 "manifest_key": manifest_key,
                 "sampled_frames_count": len(context.sampled_frames),
                 "debug_frames_count": len(context.debug_frame_keys),
+                "debug_overlays_count": len(context.debug_overlay_keys),
+                "detections_count": len(context.detections),
+                "debug_crops_count": len(context.debug_crop_keys),
+                "crops_count": len(context.crop_candidates),
+                "decode_attempts_count": len(context.decode_attempts),
+                "decoded_symbols_count": len(context.decoded_symbols),
             },
         )
         payload = context.build_manifest(
