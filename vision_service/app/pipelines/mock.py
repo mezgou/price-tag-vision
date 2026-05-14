@@ -8,6 +8,9 @@ from typing import Any
 
 from PIL import Image, ImageDraw
 
+from app.pipelines.base import BasePipeline
+from app.schemas.pipeline import ProcessRequest, ProcessResponse
+from app.services.storage import ArtifactStorage
 from shared.csv_schema import CSV_COLUMNS
 
 
@@ -17,6 +20,40 @@ class MockArtifacts:
     preview_bytes: bytes
     crop_bytes: bytes
     stats: dict[str, Any]
+
+
+class MockPipeline(BasePipeline):
+    name = "mock"
+    default_version = "0.1.0"
+
+    def run(
+        self,
+        request: ProcessRequest,
+        storage: ArtifactStorage,
+    ) -> ProcessResponse:
+        artifacts = build_mock_artifacts(
+            job_id=request.job_id,
+            input_video_key=request.input_video_key,
+            pipeline_name=request.pipeline_name or self.name,
+            pipeline_version=request.pipeline_version or self.default_version,
+        )
+
+        csv_key = f"outputs/{request.job_id}/result.csv"
+        preview_key = f"outputs/{request.job_id}/preview.json"
+        crop_key = f"outputs/{request.job_id}/crops/crop_001.jpg"
+
+        storage.upload_bytes(csv_key, artifacts.csv_bytes, "text/csv; charset=utf-8")
+        storage.upload_bytes(preview_key, artifacts.preview_bytes, "application/json")
+        storage.upload_bytes(crop_key, artifacts.crop_bytes, "image/jpeg")
+
+        return ProcessResponse(
+            job_id=request.job_id,
+            status="succeeded",
+            csv_key=csv_key,
+            preview_key=preview_key,
+            crop_keys=[crop_key],
+            stats=artifacts.stats,
+        )
 
 
 def build_mock_artifacts(

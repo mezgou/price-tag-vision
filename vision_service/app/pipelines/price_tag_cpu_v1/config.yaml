@@ -1,0 +1,30 @@
+pipeline:
+  name: price_tag_cpu_v1
+  version: "0.1.0"
+
+runtime:
+  device: cpu
+  debug: true
+
+video:
+  metadata_backend: opencv
+
+frame_sampling:
+  sample_fps: 1.0
+  max_frames: 20
+  orientation_mode: rotate_90_ccw
+  debug_save_frames: true
+  debug_jpeg_quality: 85
+
+artifacts:
+  csv: result.csv
+  preview: preview.json
+  manifest: debug/pipeline_manifest.json
+
+stages:
+  - FrameMetadataStage
+  - FrameSamplingStage
+  - EmptyDetectionsStage
+  - CsvWriterStage
+  - PreviewWriterStage
+  - DebugManifestStage

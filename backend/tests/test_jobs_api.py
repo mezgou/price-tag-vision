@@ -99,7 +99,7 @@ def test_job_model_persists_defaults_and_serializes(session_factory) -> None:
     assert payload.preview_json_key is None
     assert payload.crop_keys_json is None
     assert payload.stats_json is None
-    assert payload.pipeline_name == "mock"
+    assert payload.pipeline_name == "price_tag_cpu_v1"
     assert payload.pipeline_version == "0.1.0"
 
 
@@ -149,7 +149,7 @@ def test_create_job_uploads_file_persists_row_and_enqueues(
     assert body["status"] == "queued"
     assert body["original_filename"] == "receipt.mp4"
     assert body["input_video_key"] == f"inputs/{body['id']}/input.mp4"
-    assert body["pipeline_name"] == "mock"
+    assert body["pipeline_name"] == "price_tag_cpu_v1"
     assert body["pipeline_version"] == "0.1.0"
     assert body["output_csv_key"] is None
     assert body["preview_json_key"] is None

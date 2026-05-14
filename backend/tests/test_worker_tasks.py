@@ -50,7 +50,7 @@ def test_process_job_transitions_job_to_succeeded(
             crop_keys=[f"outputs/{job.id}/crops/crop_001.jpg"],
             stats={
                 "detected_price_tags": 1,
-                "pipeline_name": "mock",
+                "pipeline_name": "price_tag_cpu_v1",
                 "pipeline_version": "0.1.0",
             },
         ),
@@ -79,7 +79,7 @@ def test_process_job_transitions_job_to_succeeded(
     assert updates[-1]["crop_keys_json"] == [f"outputs/{job.id}/crops/crop_001.jpg"]
     assert updates[-1]["stats_json"] == {
         "detected_price_tags": 1,
-        "pipeline_name": "mock",
+        "pipeline_name": "price_tag_cpu_v1",
         "pipeline_version": "0.1.0",
     }
 
@@ -95,7 +95,7 @@ def test_process_job_transitions_job_to_succeeded(
         assert refreshed_job.crop_keys_json == [f"outputs/{job.id}/crops/crop_001.jpg"]
         assert refreshed_job.stats_json == {
             "detected_price_tags": 1,
-            "pipeline_name": "mock",
+            "pipeline_name": "price_tag_cpu_v1",
             "pipeline_version": "0.1.0",
         }
 

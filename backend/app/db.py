@@ -70,7 +70,7 @@ def _ensure_jobs_schema(engine: Engine) -> None:
         statements.append("ALTER TABLE jobs ADD COLUMN stats_json JSON")
     if "pipeline_name" not in existing_columns:
         statements.append(
-            "ALTER TABLE jobs ADD COLUMN pipeline_name VARCHAR(128) NOT NULL DEFAULT 'mock'"
+            "ALTER TABLE jobs ADD COLUMN pipeline_name VARCHAR(128) NOT NULL DEFAULT 'price_tag_cpu_v1'"
         )
     if "pipeline_version" not in existing_columns:
         statements.append(

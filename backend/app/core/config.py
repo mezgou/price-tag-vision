@@ -25,7 +25,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("VISION_SERVICE_URL", "ML_SERVICE_URL"),
     )
     pipeline_name: str = Field(
-        default="mock",
+        default="price_tag_cpu_v1",
         validation_alias=AliasChoices("PIPELINE_NAME"),
     )
     pipeline_version: str = Field(

@@ -31,7 +31,7 @@ class Job(Base):
     pipeline_name: Mapped[str] = mapped_column(
         String(128),
         nullable=False,
-        default="mock",
+        default="price_tag_cpu_v1",
     )
     pipeline_version: Mapped[str] = mapped_column(
         String(64),

@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     s3_access_key_id: str
     s3_secret_access_key: str
     s3_bucket: str = "artifacts"
-    pipeline_name: str = "mock"
+    pipeline_name: str = "price_tag_cpu_v1"
     pipeline_version: str = "0.1.0"
 
 

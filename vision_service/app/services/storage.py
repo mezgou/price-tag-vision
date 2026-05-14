@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import boto3
 from botocore.config import Config
 
@@ -23,6 +25,14 @@ class ArtifactStorage:
 
     def ensure_object(self, key: str) -> None:
         self.client.head_object(Bucket=self.settings.s3_bucket, Key=key)
+
+    def download_file(self, key: str, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        self.client.download_file(
+            self.settings.s3_bucket,
+            key,
+            str(destination),
+        )
 
     def upload_bytes(self, key: str, payload: bytes, content_type: str) -> None:
         self.client.put_object(

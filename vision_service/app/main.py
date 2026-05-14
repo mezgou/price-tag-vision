@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-from typing import Any
-
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
-from app.pipelines.mock import build_mock_artifacts
+from app.pipelines.base import PipelineExecutionError
+from app.pipelines.registry import get_pipeline_registry
+from app.schemas.pipeline import ProcessRequest, ProcessResponse
 from app.services.storage import ArtifactStorage
 
 settings = get_settings()
 storage = ArtifactStorage(settings)
+registry = get_pipeline_registry()
 
 app = FastAPI(
     title="Price Tag Vision Service",
@@ -20,23 +20,6 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
-
-
-class ProcessRequest(BaseModel):
-    job_id: str
-    input_video_key: str
-    pipeline_name: str = Field(default="mock")
-    pipeline_version: str = Field(default="0.1.0")
-    config: dict[str, Any] = Field(default_factory=dict)
-
-
-class ProcessResponse(BaseModel):
-    job_id: str
-    status: str
-    csv_key: str
-    preview_key: str
-    crop_keys: list[str]
-    stats: dict[str, Any]
 
 
 @app.get("/")
@@ -84,26 +67,19 @@ def process(request: ProcessRequest) -> ProcessResponse:
             detail=f"Input video key was not found in MinIO: {request.input_video_key}",
         ) from exc
 
-    artifacts = build_mock_artifacts(
-        job_id=request.job_id,
-        input_video_key=request.input_video_key,
-        pipeline_name=request.pipeline_name,
-        pipeline_version=request.pipeline_version,
+    requested_pipeline_name = request.pipeline_name or settings.pipeline_name
+    pipeline = registry.resolve(
+        requested_pipeline_name,
+        default_name=settings.pipeline_name,
+    )
+    resolved_request = request.model_copy(
+        update={
+            "pipeline_name": pipeline.name,
+            "pipeline_version": request.pipeline_version or pipeline.default_version,
+        }
     )
 
-    csv_key = f"outputs/{request.job_id}/result.csv"
-    preview_key = f"outputs/{request.job_id}/preview.json"
-    crop_key = f"outputs/{request.job_id}/crops/crop_001.jpg"
-
-    storage.upload_bytes(csv_key, artifacts.csv_bytes, "text/csv; charset=utf-8")
-    storage.upload_bytes(preview_key, artifacts.preview_bytes, "application/json")
-    storage.upload_bytes(crop_key, artifacts.crop_bytes, "image/jpeg")
-
-    return ProcessResponse(
-        job_id=request.job_id,
-        status="succeeded",
-        csv_key=csv_key,
-        preview_key=preview_key,
-        crop_keys=[crop_key],
-        stats=artifacts.stats,
-    )
+    try:
+        return pipeline.run(resolved_request, storage)
+    except PipelineExecutionError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
