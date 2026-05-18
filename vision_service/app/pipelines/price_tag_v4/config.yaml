@@ -90,7 +90,7 @@ multi_view_fusion:
   upload_debug_images: true
 
 barcode_qr_decode:
-  enabled: false
+  enabled: true
   max_crops: 300
   min_crop_quality_score: 0.05
   decoders:
@@ -116,8 +116,14 @@ barcode_qr_decode:
   stop_after_first_success_per_crop: true
   max_payload_preview_length: 500
 
+barcode_qr_zone_decode:
+  enabled: true
+  max_crops: 300
+  min_crop_quality_score: 0.05
+  stop_after_first_success_per_crop: true
+
 barcode_bars_decode:
-  enabled: false
+  enabled: true
   max_tracks: 140
   min_confidence: 0.70
 
@@ -131,11 +137,11 @@ zonal_ocr:
   tesseract_lang: rus+eng
 
 fused_zonal_decode:
-  enabled: false
+  enabled: true
   max_tracks: 140
 
 char_consensus:
-  enabled: false
+  enabled: true
 
 row_fusion:
   enabled: true
@@ -143,15 +149,20 @@ row_fusion:
   default_absent_value: нет
 
 catalog_builder_v4:
-  enabled: true
+  enabled: false
   gt_root: data/videos
   db_hack_path: data/db_hack.csv
   load_db_hack: true
 
-track_to_catalog_assignment:
+db_hack_product_resolver:
   enabled: true
+  db_hack_path: data/db_hack.csv
+  repair_one_digit: true
+
+track_to_catalog_assignment:
+  enabled: false
   gt_root: data/videos
-  catalog_spatial_mode: true
+  catalog_spatial_mode: false
   catalog_semantic_mode: true
   same_video_only_in_spatial_mode: true
   allow_spatial_split_assignments: true
@@ -162,7 +173,7 @@ track_to_catalog_assignment:
   strong_spatial_iou: 0.50
 
 row_materializer_v4:
-  enabled: true
+  enabled: false
   output_unassigned: false
   copy_empty_catalog_values: false
   default_absent_value: нет
@@ -184,9 +195,11 @@ stages:
   - FallbackHeuristicCandidateDetectionStage
   - TrackletGraphMergeStage
   - CropExtractionStage
+  - BarcodeQrDecodeStage
+  - QrZoneDecodeStage
+  - ZonalOcrStage
   - TrackCropBankStage
   - MultiViewFusionStage
-  - BarcodeQrDecodeStage
   - BarcodeBarsV2Stage
   - FusedZonalDecodeStage
   - CharConsensusStage

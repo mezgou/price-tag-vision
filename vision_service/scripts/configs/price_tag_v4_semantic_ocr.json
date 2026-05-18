@@ -1,0 +1,83 @@
+{
+  "frame_sampling": {
+    "sample_fps": 1.0,
+    "max_frames": 90,
+    "debug_save_frames": true
+  },
+  "crop_extraction": {
+    "enabled": true,
+    "max_total_crops": 500,
+    "max_crops_per_frame": 24,
+    "debug_save_crops": true,
+    "debug_save_contact_sheet": true
+  },
+  "track_crop_bank": {
+    "enabled": true,
+    "max_tracks": 120,
+    "min_crops_per_track": 1
+  },
+  "multi_view_fusion": {
+    "enabled": true,
+    "max_tracks": 80,
+    "max_crops_per_track": 12,
+    "min_crops_per_track": 1,
+    "upload_debug_images": true
+  },
+  "barcode_qr_decode": {
+    "enabled": true,
+    "max_crops": 160,
+    "variants": {
+      "clahe": true,
+      "sharpened": true,
+      "resized_x4": false,
+      "small_angle_rotations": false
+    }
+  },
+  "barcode_qr_zone_decode": {
+    "enabled": true,
+    "max_crops": 80,
+    "min_crop_quality_score": 0.05
+  },
+  "zonal_ocr": {
+    "enabled": true,
+    "max_crops": 24,
+    "min_crop_quality_score": 0.50,
+    "engine_order": [
+      "paddle",
+      "tesseract"
+    ],
+    "tesseract_lang": "rus+eng"
+  },
+  "barcode_bars_decode": {
+    "enabled": false,
+    "max_tracks": 80,
+    "min_confidence": 0.70
+  },
+  "fused_zonal_decode": {
+    "enabled": false,
+    "max_tracks": 45
+  },
+  "char_consensus": {
+    "enabled": true
+  },
+  "catalog_builder_v4": {
+    "enabled": false
+  },
+  "db_hack_product_resolver": {
+    "enabled": true,
+    "db_hack_path": "data/db_hack.csv",
+    "repair_one_digit": true
+  },
+  "track_to_catalog_assignment": {
+    "enabled": false,
+    "catalog_spatial_mode": false,
+    "catalog_semantic_mode": true
+  },
+  "row_materializer_v4": {
+    "enabled": false,
+    "output_unassigned": true
+  },
+  "coverage_oracle_debugger": {
+    "enabled": true
+  }
+}

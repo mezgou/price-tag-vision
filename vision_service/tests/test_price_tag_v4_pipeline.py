@@ -8,6 +8,10 @@ from app.pipelines.price_tag_v4.stages.catalog_builder import (
     filename_keys,
     load_db_hack_catalog,
 )
+from app.pipelines.price_tag_v4.stages.db_hack_product_resolver import (
+    barcode_candidates_from_crop,
+    merge_catalog_identity,
+)
 from app.pipelines.price_tag_v4.stages.row_materializer import (
     RowMaterializerConfig,
     RowMaterializerStage,
@@ -20,6 +24,7 @@ from app.pipelines.price_tag_v4.stages.track_to_catalog_assignment import (
 )
 from app.pipelines.registry import get_pipeline_registry
 from app.schemas.detections import BoundingBox
+from app.schemas.detections import CropCandidate, CropQuality
 from shared.csv_schema import CSV_COLUMNS
 
 
@@ -30,7 +35,13 @@ def test_price_tag_v4_pipeline_config_loads() -> None:
     assert pipeline.default_version == "0.1.0"
     assert pipeline._base_config["camera"]["undistort"] is True
     assert pipeline._base_config["catalog_builder_v4"]["db_hack_path"] == "data/db_hack.csv"
+    assert pipeline._base_config["catalog_builder_v4"]["enabled"] is False
+    assert pipeline._base_config["track_to_catalog_assignment"]["enabled"] is False
+    assert pipeline._base_config["row_materializer_v4"]["enabled"] is False
     assert "TrackToCatalogAssignmentStage" in [stage.name for stage in pipeline._stages]
+    assert "QrZoneDecodeStage" in [stage.name for stage in pipeline._stages]
+    assert "ZonalOcrStage" in [stage.name for stage in pipeline._stages]
+    assert "DbHackProductResolverStage" in [stage.name for stage in pipeline._stages]
     assert "RowMaterializerStage" in [stage.name for stage in pipeline._stages]
 
 
@@ -115,6 +126,7 @@ def test_v4_materializer_backfills_assigned_catalog_row(pipeline_context) -> Non
     assert conflict is False
     assert row["barcode"] == "4607124143901"
     assert row["qr_code_barcode"] == "4607124143901"
+    assert row["color"] == row["price_discount"]
     assert row["product_name"] == "Catalog Product"
     assert row["frame_timestamp"] == "1234"
     assert row["x_min"] == "10.0"
@@ -127,6 +139,34 @@ def test_v4_db_hack_loader_decodes_cp1251(tmp_path: Path) -> None:
     catalog = load_db_hack_catalog(db_path)
 
     assert catalog.name_for("4607124143901") == "Товар тестовый"
+
+
+def test_v4_db_hack_resolver_repairs_12_digit_ocr_barcode() -> None:
+    crop = _crop_with_ocr_text("barcode 460712414390")
+    candidates = barcode_candidates_from_crop(
+        crop,
+        repair_one_digit=True,
+        valid_codes={"4607124143901": "Товар тестовый"},
+    )
+
+    assert candidates == [("4607124143901", 0.84, "ocr_12_plus_checksum")]
+
+
+def test_v4_db_hack_identity_merge_sets_name_and_match_key() -> None:
+    crop = _crop_with_ocr_text("")
+
+    merge_catalog_identity(
+        crop,
+        barcode="4607124143901",
+        product_name="Товар тестовый",
+        confidence=0.96,
+        source="ocr_exact_ean13",
+    )
+
+    fields = crop.attributes["ocr"]["fields"]
+    assert fields["barcode"] == "4607124143901"
+    assert fields["qr_code_barcode"] == "4607124143901"
+    assert fields["product_name"] == "Товар тестовый"
 
 
 def _entry(index: int, barcode: str, bbox: BoundingBox) -> LayoutCatalogEntry:
@@ -160,4 +200,32 @@ def _track(track_id: str, bbox: BoundingBox) -> TrackEvidence:
         raw_bboxes=((f"{track_id}_det", 1000, bbox),),
         shelf_band=0,
         order_x=float(bbox.x_min),
+    )
+
+
+def _crop_with_ocr_text(text: str) -> CropCandidate:
+    bbox = BoundingBox(x_min=0, y_min=0, x_max=100, y_max=60)
+    return CropCandidate(
+        crop_id="crop_1",
+        detection_id="det_1",
+        frame_index=0,
+        timestamp_ms=0,
+        bbox=bbox,
+        padded_bbox=bbox,
+        crop_key="",
+        width=100,
+        height=60,
+        quality=CropQuality(
+            sharpness=1.0,
+            brightness=100.0,
+            contrast=20.0,
+            glare_ratio=0.0,
+            area_ratio=0.1,
+            score=0.9,
+        ),
+        source="test",
+        attributes={
+            "track_id": "track_1",
+            "ocr": {"text": text, "fields": {}},
+        },
     )

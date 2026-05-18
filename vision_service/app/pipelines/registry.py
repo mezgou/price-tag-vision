@@ -8,6 +8,7 @@ from app.pipelines.price_tag_cpu_v1 import PriceTagCpuV1Pipeline
 from app.pipelines.price_tag_v2 import PriceTagV2Pipeline
 from app.pipelines.price_tag_v3 import PriceTagV3Pipeline
 from app.pipelines.price_tag_v4 import PriceTagV4Pipeline
+from app.pipelines.price_tag_v5 import PriceTagV5Pipeline
 
 
 class PipelineRegistry:
@@ -45,4 +46,5 @@ def get_pipeline_registry() -> PipelineRegistry:
     registry.register(PriceTagV2Pipeline())
     registry.register(PriceTagV3Pipeline())
     registry.register(PriceTagV4Pipeline())
+    registry.register(PriceTagV5Pipeline())
     return registry

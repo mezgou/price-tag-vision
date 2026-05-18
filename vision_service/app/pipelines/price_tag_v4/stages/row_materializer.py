@@ -14,6 +14,7 @@ from shared.csv_schema import CSV_COLUMNS
 
 NO_VALUE = "нет"
 DEFAULT_ABSENT_FIELDS = {
+    "color",
     "price_discount",
     "price3_qr",
     "wholesale_level_1_count",

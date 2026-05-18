@@ -37,6 +37,7 @@ QR_TO_VISIBLE_FIELD_MAP = {
     "qr_code_barcode": "barcode",
 }
 DEFAULT_ABSENT_FIELDS = {
+    "color",
     "price_discount",
     "price3_qr",
     "wholesale_level_1_count",

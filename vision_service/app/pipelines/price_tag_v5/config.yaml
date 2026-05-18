@@ -1,0 +1,92 @@
+pipeline:
+  name: price_tag_v5
+  version: "0.1.0"
+
+runtime:
+  device: cpu
+  debug: true
+
+video:
+  metadata_backend: opencv
+
+# Process in undistorted + upright space; CSV bbox mapped back to raw.
+camera:
+  undistort: true
+
+frame_sampling:
+  sample_fps: 5.0
+  max_frames: 600
+  orientation_mode: none
+  debug_save_frames: true
+  debug_jpeg_quality: 88
+
+yolo_detection:
+  enabled: true
+  weights_path: runs/detect/train/weights/best.pt
+  fallback_weights_path: runs/detect/train/weights/best.pt
+  source: yolov8m_price_tag_runs_train
+  confidence_threshold: 0.20
+  iou_threshold: 0.50
+  imgsz: 1280
+  device: "0"
+  max_detections_per_frame: 32
+
+tracking:
+  enabled: true
+  source: bytetrack_v1
+  iou_threshold: 0.18
+  center_distance_ratio: 0.65
+  max_time_gap_ms: 2500
+
+crop_extraction:
+  enabled: true
+  source: crop_extraction_top_quality_v2
+  bbox_padding_ratio: 0.12
+  min_crop_width: 50
+  min_crop_height: 50
+  max_crops_per_frame: 32
+  max_total_crops: 600
+  debug_save_crops: true
+  debug_crop_jpeg_quality: 92
+  top_crops_preview_limit: 40
+  debug_save_contact_sheet: true
+  contact_sheet_top_n: 80
+  contact_sheet_thumb_width: 180
+
+top_k_crop_selection:
+  enabled: true
+  max_crops_per_track: 8
+  max_total_crops: 900
+  min_quality_score: 0.05
+
+# v5 identity engine: one fast full-crop PaddleOCR-en pass per crop,
+# block-geometry price parse, per-track brand-token pool -> CatalogResolver
+# (db_hack.csv) -> exact product_name + safe barcode. No GT used.
+v5_block_ocr:
+  enabled: true
+  max_crops: 900
+  upscale: 3.0
+  category: wine
+  db_path: data/db_hack.csv
+
+row_fusion:
+  enabled: true
+  include_undecoded_detections: true
+  default_absent_value: нет
+
+artifacts:
+  csv: result.csv
+  preview: preview.json
+  manifest: debug/pipeline_manifest.json
+
+stages:
+  - FrameMetadataStage
+  - FrameSamplingStage
+  - YoloByteTrackStage
+  - CropExtractionStage
+  - TopKCropSelectionStage
+  - V5BlockOcrCatalogStage
+  - RowFusionStage
+  - CsvWriterStage
+  - PreviewWriterStage
+  - DebugManifestStage

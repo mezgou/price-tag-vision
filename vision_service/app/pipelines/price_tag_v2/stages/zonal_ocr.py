@@ -699,17 +699,32 @@ def classify_tag_color(crop: np.ndarray) -> str:
         cv2.inRange(hsv, (170, 45, 70), (180, 255, 255)),
     )
     yellow_mask = cv2.inRange(hsv, (14, 55, 85), (40, 255, 255))
-    green_mask = cv2.inRange(hsv, (40, 40, 55), (90, 255, 255))
-    counts = {
-        "red": int(cv2.countNonZero(red_mask)),
-        "yellow": int(cv2.countNonZero(yellow_mask)),
-        "green": int(cv2.countNonZero(green_mask)),
-    }
-    color, count = max(counts.items(), key=lambda item: item[1])
     area = max(crop.shape[0] * crop.shape[1], 1)
-    if count / float(area) < 0.015:
-        return ""
-    return color
+    white_mask = cv2.inRange(hsv, (0, 0, 160), (180, 45, 255))
+    ratios = {
+        "\u043a\u0440\u0430\u0441\u043d\u044b\u0439": cv2.countNonZero(red_mask) / float(area),
+        "\u0436\u0451\u043b\u0442\u044b\u0439": cv2.countNonZero(yellow_mask) / float(area),
+        "\u0431\u0435\u043b\u044b\u0439": cv2.countNonZero(white_mask) / float(area),
+    }
+    accent_color, accent_ratio = max(
+        (
+            ("\u043a\u0440\u0430\u0441\u043d\u044b\u0439", ratios["\u043a\u0440\u0430\u0441\u043d\u044b\u0439"]),
+            ("\u0436\u0451\u043b\u0442\u044b\u0439", ratios["\u0436\u0451\u043b\u0442\u044b\u0439"]),
+        ),
+        key=lambda item: item[1],
+    )
+
+    # Red/yellow promos must win even when the crop also contains a large
+    # white text area. White is the fallback base tag color.
+    if accent_ratio >= 0.04:
+        return accent_color
+    if ratios["\u0431\u0435\u043b\u044b\u0439"] >= 0.35:
+        return "\u0431\u0435\u043b\u044b\u0439"
+    if accent_ratio >= 0.015:
+        return accent_color
+    if ratios["\u0431\u0435\u043b\u044b\u0439"] >= 0.015:
+        return "\u0431\u0435\u043b\u044b\u0439"
+    return ""
 
 
 def _orientation_variants(crop: np.ndarray) -> dict[str, np.ndarray]:
