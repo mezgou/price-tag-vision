@@ -1,0 +1,45 @@
+{
+  "crop_extraction": {
+    "enabled": false,
+    "debug_save_crops": false,
+    "debug_save_contact_sheet": false,
+    "max_total_crops": 1
+  },
+  "track_crop_bank": {
+    "enabled": false
+  },
+  "multi_view_fusion": {
+    "enabled": false
+  },
+  "barcode_qr_decode": {
+    "enabled": false
+  },
+  "barcode_bars_decode": {
+    "enabled": false
+  },
+  "fused_zonal_decode": {
+    "enabled": false
+  },
+  "char_consensus": {
+    "enabled": false
+  },
+  "catalog_builder_v4": {
+    "load_db_hack": true
+  },
+  "track_to_catalog_assignment": {
+    "catalog_spatial_mode": true,
+    "catalog_semantic_mode": false,
+    "same_video_only_in_spatial_mode": true,
+    "allow_spatial_split_assignments": true,
+    "spatial_split_min_iou": 0.50,
+    "min_score": 70.0,
+    "min_margin": 2.0,
+    "min_spatial_iou": 0.18
+  },
+  "row_materializer_v4": {
+    "output_unassigned": false
+  },
+  "coverage_oracle_debugger": {
+    "enabled": true
+  }
+}

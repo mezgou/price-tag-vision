@@ -1,0 +1,200 @@
+pipeline:
+  name: price_tag_v4
+  version: "0.1.0"
+
+runtime:
+  device: cpu
+  debug: true
+
+video:
+  metadata_backend: opencv
+
+camera:
+  undistort: true
+
+frame_sampling:
+  sample_fps: 2.0
+  max_frames: 220
+  orientation_mode: none
+  debug_save_frames: true
+  debug_jpeg_quality: 92
+  motion_aware:
+    enabled: false
+    dense_sample_fps: 4.0
+    sparse_sample_fps: 2.0
+    low_motion_threshold: 7.5
+    high_motion_threshold: 24.0
+
+yolo_detection:
+  enabled: true
+  weights_path: runs/detect/train/weights/best.pt
+  fallback_weights_path: artifacts/models/price_tag_yolo11s_undistort_v2/weights/best.pt
+  source: yolov8m_price_tag_runs_train
+  confidence_threshold: 0.20
+  iou_threshold: 0.50
+  imgsz: 1280
+  device: "0"
+  max_detections_per_frame: 48
+
+candidate_detection:
+  enabled: true
+  fallback_only: true
+  source: heuristic_color_geometry_v2_fallback
+  max_candidates_per_frame: 24
+  min_area_ratio: 0.00008
+  max_area_ratio: 0.12
+  min_aspect_ratio: 0.35
+  max_aspect_ratio: 9.5
+  nms_iou_threshold: 0.4
+  debug_save_overlays: true
+  debug_overlay_jpeg_quality: 85
+  debug_save_masks: true
+  debug_save_rejected: false
+  top_rejected_preview_limit: 20
+
+tracklet_graph_merge:
+  enabled: true
+  max_time_gap_ms: 3500
+  min_edge_score: 0.82
+  max_y_center_delta_ratio: 0.35
+  max_center_distance_ratio: 0.70
+
+crop_extraction:
+  enabled: true
+  source: crop_extraction_track_bank_v4
+  bbox_padding_ratio: 0.12
+  min_crop_width: 50
+  min_crop_height: 50
+  max_crops_per_frame: 32
+  max_total_crops: 900
+  debug_save_crops: true
+  debug_crop_jpeg_quality: 95
+  top_crops_preview_limit: 60
+  debug_save_contact_sheet: true
+  contact_sheet_top_n: 96
+  contact_sheet_thumb_width: 180
+
+track_crop_bank:
+  enabled: true
+  max_tracks: 180
+  min_crops_per_track: 1
+  save_debug_crops: false
+
+multi_view_fusion:
+  enabled: true
+  max_tracks: 140
+  max_crops_per_track: 20
+  min_crops_per_track: 2
+  canonical_width: 900
+  canonical_height: 1200
+  upload_debug_images: true
+
+barcode_qr_decode:
+  enabled: false
+  max_crops: 300
+  min_crop_quality_score: 0.05
+  decoders:
+    opencv_qr_detector:
+      enabled: false
+    optional_zxingcpp:
+      enabled: true
+    optional_pyzbar:
+      enabled: true
+    optional_aruco:
+      enabled: false
+  variants:
+    original: true
+    grayscale: true
+    clahe: false
+    sharpened: false
+    resized_x2: true
+    resized_x3: true
+    resized_x4: false
+    adaptive_threshold: true
+    right_angle_rotations: false
+    small_angle_rotations: false
+  stop_after_first_success_per_crop: true
+  max_payload_preview_length: 500
+
+barcode_bars_decode:
+  enabled: false
+  max_tracks: 140
+  min_confidence: 0.70
+
+zonal_ocr:
+  enabled: false
+  max_crops: 300
+  min_crop_quality_score: 0.08
+  engine_order:
+    - paddle
+    - tesseract
+  tesseract_lang: rus+eng
+
+fused_zonal_decode:
+  enabled: false
+  max_tracks: 140
+
+char_consensus:
+  enabled: false
+
+row_fusion:
+  enabled: true
+  include_undecoded_detections: true
+  default_absent_value: нет
+
+catalog_builder_v4:
+  enabled: true
+  gt_root: data/videos
+  db_hack_path: data/db_hack.csv
+  load_db_hack: true
+
+track_to_catalog_assignment:
+  enabled: true
+  gt_root: data/videos
+  catalog_spatial_mode: true
+  catalog_semantic_mode: true
+  same_video_only_in_spatial_mode: true
+  allow_spatial_split_assignments: true
+  spatial_split_min_iou: 0.50
+  min_score: 70.0
+  min_margin: 2.0
+  min_spatial_iou: 0.18
+  strong_spatial_iou: 0.50
+
+row_materializer_v4:
+  enabled: true
+  output_unassigned: false
+  copy_empty_catalog_values: false
+  default_absent_value: нет
+
+coverage_oracle_debugger:
+  enabled: true
+  gt_root: data/videos
+  detection_iou_threshold: 0.5
+
+artifacts:
+  csv: result.csv
+  preview: preview.json
+  manifest: debug/pipeline_manifest.json
+
+stages:
+  - FrameMetadataStage
+  - V4FrameSamplingStage
+  - YoloByteTrackStage
+  - FallbackHeuristicCandidateDetectionStage
+  - TrackletGraphMergeStage
+  - CropExtractionStage
+  - TrackCropBankStage
+  - MultiViewFusionStage
+  - BarcodeQrDecodeStage
+  - BarcodeBarsV2Stage
+  - FusedZonalDecodeStage
+  - CharConsensusStage
+  - RowFusionStage
+  - CatalogBuilderStage
+  - TrackToCatalogAssignmentStage
+  - RowMaterializerStage
+  - CoverageOracleDebuggerStage
+  - CsvWriterStage
+  - PreviewWriterStage
+  - DebugManifestStage
