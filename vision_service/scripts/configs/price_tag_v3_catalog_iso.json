@@ -1,0 +1,31 @@
+{
+  "frame_sampling": {
+    "motion_aware": {
+      "enabled": false
+    }
+  },
+  "crop_extraction": {
+    "enabled": false
+  },
+  "barcode_qr_decode": {
+    "enabled": false
+  },
+  "track_crop_bank": {
+    "enabled": false
+  },
+  "multi_view_fusion": {
+    "enabled": false
+  },
+  "barcode_bars_decode": {
+    "enabled": false
+  },
+  "zonal_ocr": {
+    "enabled": false
+  },
+  "fused_zonal_decode": {
+    "enabled": false
+  },
+  "char_consensus": {
+    "enabled": false
+  }
+}

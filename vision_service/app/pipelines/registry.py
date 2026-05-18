@@ -6,6 +6,7 @@ from app.pipelines.base import BasePipeline
 from app.pipelines.mock import MockPipeline
 from app.pipelines.price_tag_cpu_v1 import PriceTagCpuV1Pipeline
 from app.pipelines.price_tag_v2 import PriceTagV2Pipeline
+from app.pipelines.price_tag_v3 import PriceTagV3Pipeline
 
 
 class PipelineRegistry:
@@ -41,4 +42,5 @@ def get_pipeline_registry() -> PipelineRegistry:
     registry.register(MockPipeline())
     registry.register(PriceTagCpuV1Pipeline())
     registry.register(PriceTagV2Pipeline())
+    registry.register(PriceTagV3Pipeline())
     return registry

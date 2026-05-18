@@ -1,0 +1,11 @@
+{
+  "crop_extraction": {
+    "enabled": false
+  },
+  "barcode_qr_decode": {
+    "enabled": false
+  },
+  "zonal_ocr": {
+    "enabled": false
+  }
+}

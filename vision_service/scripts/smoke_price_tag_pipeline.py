@@ -152,11 +152,23 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-candidates-per-frame", type=int, default=24)
     parser.add_argument("--max-total-crops", type=int, default=120)
     parser.add_argument("--max-crops-per-frame", type=int, default=16)
+    parser.add_argument(
+        "--config-json",
+        type=str,
+        default="",
+        help="Optional JSON object deep-merged into the smoke request config.",
+    )
+    parser.add_argument(
+        "--config-file",
+        type=Path,
+        default=None,
+        help="Optional JSON file deep-merged into the smoke request config.",
+    )
     return parser.parse_args()
 
 
 def _build_request_config(args: argparse.Namespace) -> dict[str, Any]:
-    return {
+    config = {
         "frame_sampling": {
             "sample_fps": args.sample_fps,
             "max_frames": args.max_frames,
@@ -169,6 +181,27 @@ def _build_request_config(args: argparse.Namespace) -> dict[str, Any]:
             "max_crops_per_frame": args.max_crops_per_frame,
         },
     }
+    if args.config_json.strip():
+        override = json.loads(args.config_json)
+        if not isinstance(override, dict):
+            raise ValueError("--config-json must decode to a JSON object.")
+        config = _deep_merge(config, override)
+    if args.config_file is not None:
+        override = json.loads(args.config_file.read_text(encoding="utf-8-sig"))
+        if not isinstance(override, dict):
+            raise ValueError("--config-file must contain a JSON object.")
+        config = _deep_merge(config, override)
+    return config
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    for key, value in override.items():
+        current = base.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            base[key] = _deep_merge(current, value)
+        else:
+            base[key] = value
+    return base
 
 
 def _slugify(value: str) -> str:
