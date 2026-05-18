@@ -15,3 +15,13 @@ tmp/
 
 # Files
 .env
+
+# large regenerable artifacts
+my_dataset_yolo/
+vision_service/models/sr/EDSR_x4.pb
+runs/detect/train/weights/last.pt
+.claude/
+yolo11n.pt
+yolo11s.pt
+yolo26n.pt
+yolov8m.pt
