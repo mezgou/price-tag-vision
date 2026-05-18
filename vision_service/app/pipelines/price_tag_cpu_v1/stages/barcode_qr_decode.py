@@ -16,6 +16,8 @@ from app.utils.image_processing import clip_bbox_to_frame
 
 OPENCV_QR_DECODER = "opencv_qr_detector"
 OPTIONAL_ZXINGCPP_DECODER = "zxingcpp"
+OPTIONAL_PYZBAR_DECODER = "pyzbar"
+OPTIONAL_ARUCO_DECODER = "aruco_qr"
 
 
 @dataclass(slots=True)
@@ -25,6 +27,8 @@ class BarcodeQrDecodeConfig:
     min_crop_quality_score: float
     opencv_qr_detector_enabled: bool
     optional_zxingcpp_enabled: bool
+    optional_pyzbar_enabled: bool
+    optional_aruco_enabled: bool
     variants: dict[str, bool]
     stop_after_first_success_per_crop: bool
     max_payload_preview_length: int
@@ -82,6 +86,18 @@ class BarcodeQrDecodeConfig:
                 field_name="optional_zxingcpp",
                 warnings=warnings,
             ),
+            optional_pyzbar_enabled=_decode_enabled_flag(
+                raw_decoders.get("optional_pyzbar"),
+                default=False,
+                field_name="optional_pyzbar",
+                warnings=warnings,
+            ),
+            optional_aruco_enabled=_decode_enabled_flag(
+                raw_decoders.get("optional_aruco"),
+                default=False,
+                field_name="optional_aruco",
+                warnings=warnings,
+            ),
             variants={
                 "original": _coerce_bool(
                     raw_variants.get("original"),
@@ -113,10 +129,34 @@ class BarcodeQrDecodeConfig:
                     field_name="variants.resized_x2",
                     warnings=warnings,
                 ),
+                "resized_x3": _coerce_bool(
+                    raw_variants.get("resized_x3"),
+                    default=False,
+                    field_name="variants.resized_x3",
+                    warnings=warnings,
+                ),
+                "resized_x4": _coerce_bool(
+                    raw_variants.get("resized_x4"),
+                    default=False,
+                    field_name="variants.resized_x4",
+                    warnings=warnings,
+                ),
                 "adaptive_threshold": _coerce_bool(
                     raw_variants.get("adaptive_threshold"),
                     default=True,
                     field_name="variants.adaptive_threshold",
+                    warnings=warnings,
+                ),
+                "right_angle_rotations": _coerce_bool(
+                    raw_variants.get("right_angle_rotations"),
+                    default=False,
+                    field_name="variants.right_angle_rotations",
+                    warnings=warnings,
+                ),
+                "small_angle_rotations": _coerce_bool(
+                    raw_variants.get("small_angle_rotations"),
+                    default=False,
+                    field_name="variants.small_angle_rotations",
                     warnings=warnings,
                 ),
             },
@@ -141,6 +181,10 @@ class BarcodeQrDecodeConfig:
             decoders.append(OPENCV_QR_DECODER)
         if self.optional_zxingcpp_enabled:
             decoders.append(OPTIONAL_ZXINGCPP_DECODER)
+        if self.optional_pyzbar_enabled:
+            decoders.append(OPTIONAL_PYZBAR_DECODER)
+        if self.optional_aruco_enabled:
+            decoders.append(OPTIONAL_ARUCO_DECODER)
         return decoders
 
 
@@ -247,7 +291,11 @@ class BarcodeQrDecodeStage(BaseStage):
                 include_clahe=config.variants["clahe"],
                 include_sharpened=config.variants["sharpened"],
                 include_resized_x2=config.variants["resized_x2"],
+                include_resized_x3=config.variants["resized_x3"],
+                include_resized_x4=config.variants["resized_x4"],
                 include_adaptive_threshold=config.variants["adaptive_threshold"],
+                include_right_angle_rotations=config.variants["right_angle_rotations"],
+                include_small_angle_rotations=config.variants["small_angle_rotations"],
             )
             seen_payloads: set[tuple[str, str]] = set()
             crops_processed += 1
@@ -388,7 +436,99 @@ def _resolve_decoder_runners(
                 )
             )
 
+    if config.optional_pyzbar_enabled:
+        if find_spec("pyzbar") is None:
+            warnings.append(
+                "optional_pyzbar decoder was enabled in config but pyzbar is not installed."
+            )
+        else:
+            try:
+                from pyzbar import pyzbar as pyzbar_module  # type: ignore[import-not-found]
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(
+                    "optional_pyzbar decoder was enabled but could not be initialized: "
+                    f"{exc}"
+                )
+            else:
+                runners.append(
+                    (
+                        OPTIONAL_PYZBAR_DECODER,
+                        lambda variant, module=pyzbar_module: _decode_with_optional_pyzbar(
+                            variant=variant,
+                            pyzbar_module=module,
+                        ),
+                    )
+                )
+
+    if config.optional_aruco_enabled:
+        aruco_detector = _build_aruco_detector()
+        if aruco_detector is None:
+            warnings.append(
+                "optional_aruco decoder was enabled but cv2.QRCodeDetectorAruco "
+                "is unavailable in this OpenCV build."
+            )
+        else:
+            runners.append(
+                (
+                    OPTIONAL_ARUCO_DECODER,
+                    lambda variant, detector=aruco_detector: _decode_with_aruco_qr_detector(
+                        detector=detector,
+                        variant=variant,
+                    ),
+                )
+            )
+
     return runners
+
+
+def _build_aruco_detector() -> Any | None:
+    factory = getattr(cv2, "QRCodeDetectorAruco", None)
+    if factory is None:
+        return None
+    try:
+        return factory()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _decode_with_aruco_qr_detector(
+    *,
+    detector: Any,
+    variant: DecodeVariantImage,
+) -> list[DecoderHit]:
+    """ArUco-based QR finder; better on tilted / small 4K QR codes."""
+    hits: list[DecoderHit] = []
+    if hasattr(detector, "detectAndDecodeMulti"):
+        multi_payloads, multi_points = _detect_and_decode_multi(detector, variant.image)
+        for payload, points in zip(multi_payloads, multi_points):
+            hits.append(
+                DecoderHit(
+                    payload=payload,
+                    symbol_type="qr",
+                    confidence=_decoder_confidence(
+                        decoder=OPTIONAL_ARUCO_DECODER, variant=variant.name
+                    ),
+                    bbox=_bbox_from_points(points=points, variant=variant),
+                    attributes={"multi": True},
+                )
+            )
+    if hits:
+        return hits
+
+    payload, points = _detect_and_decode_single(detector, variant.image)
+    if not payload:
+        return []
+    return [
+        DecoderHit(
+            payload=payload,
+            symbol_type="qr",
+            confidence=_decoder_confidence(
+                decoder=OPTIONAL_ARUCO_DECODER, variant=variant.name
+            ),
+            bbox=_bbox_from_points(points=points, variant=variant),
+            attributes={"multi": False},
+        )
+    ]
 
 
 def _build_frame_lookup(
@@ -533,12 +673,48 @@ def _decode_with_optional_zxingcpp(variant: DecodeVariantImage) -> list[DecoderH
     return hits
 
 
+def _decode_with_optional_pyzbar(
+    *,
+    variant: DecodeVariantImage,
+    pyzbar_module: Any,
+) -> list[DecoderHit]:
+    hits: list[DecoderHit] = []
+    for result in pyzbar_module.decode(variant.image):
+        payload = normalize_decoded_payload(getattr(result, "data", b""))
+        if not payload:
+            continue
+
+        format_name = str(getattr(result, "type", "unknown")).lower()
+        symbol_type = "unknown"
+        if "qr" in format_name:
+            symbol_type = "qr"
+        elif format_name != "unknown":
+            symbol_type = "barcode"
+
+        hits.append(
+            DecoderHit(
+                payload=payload,
+                symbol_type=symbol_type,
+                confidence=_decoder_confidence(
+                    decoder=OPTIONAL_PYZBAR_DECODER,
+                    variant=variant.name,
+                ),
+                bbox=None,
+                attributes={"format": format_name},
+            )
+        )
+
+    return hits
+
+
 def _bbox_from_points(
     *,
     points: np.ndarray | None,
     variant: DecodeVariantImage,
 ) -> BoundingBox | None:
     if points is None:
+        return None
+    if abs(variant.rotation_degrees) > 1e-6:
         return None
 
     normalized_points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
@@ -566,14 +742,22 @@ def _bbox_from_points(
 
 def _decoder_confidence(*, decoder: str, variant: str) -> float:
     base_confidence = 0.68 if decoder == OPENCV_QR_DECODER else 0.82
+    if decoder == OPTIONAL_PYZBAR_DECODER:
+        base_confidence = 0.78
     variant_bonus = {
         "original": 0.00,
         "grayscale": 0.02,
         "clahe": 0.05,
         "sharpened": 0.04,
         "resized_x2": 0.08,
+        "resized_x3": 0.09,
+        "resized_x4": 0.10,
         "adaptive_threshold": 0.03,
     }
+    if variant.startswith("rotated_"):
+        return float(min(base_confidence + 0.08, 0.95))
+    if variant.startswith("tilt_"):
+        return float(min(base_confidence + 0.04, 0.95))
     return float(min(base_confidence + variant_bonus.get(variant, 0.0), 0.95))
 
 

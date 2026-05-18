@@ -17,6 +17,7 @@ def test_price_tag_pipeline_config_loads() -> None:
     assert pipeline._base_config["frame_sampling"]["sample_fps"] == 1.0
     assert pipeline._base_config["frame_sampling"]["orientation_mode"] == "rotate_90_ccw"
     assert pipeline._base_config["candidate_detection"]["enabled"] is True
+    assert pipeline._base_config["candidate_detection"]["source"] == "heuristic_color_geometry_v2"
     assert pipeline._base_config["crop_extraction"]["enabled"] is True
     assert pipeline._base_config["barcode_qr_decode"]["enabled"] is True
 
@@ -51,7 +52,9 @@ def test_process_api_returns_sampling_stats_and_artifacts(
     assert body["stats"]["sampled_frames_count"] > 0
     assert body["stats"]["debug_frames_count"] > 0
     assert body["stats"]["debug_overlays_count"] > 0
+    assert body["stats"]["debug_masks_count"] > 0
     assert body["stats"]["debug_crops_count"] >= 0
+    assert body["stats"]["debug_contact_sheets_count"] >= 0
     assert body["stats"]["frame_count"] == 10
     assert body["stats"]["detections_total"] >= 0
     assert body["stats"]["detections_by_frame_count"] >= 0
@@ -60,6 +63,7 @@ def test_process_api_returns_sampling_stats_and_artifacts(
     assert body["stats"]["decoded_symbols_total"] >= 0
     assert body["stats"]["decoded_qr_total"] >= 0
     assert body["stats"]["decoded_barcode_total"] >= 0
+    assert body["stats"]["crop_quality_summary"]["count"] >= 0
     assert body["stats"]["final_rows"] == 0
 
     csv_payload, csv_content_type = in_memory_storage.objects["outputs/job-api-123/result.csv"]
@@ -75,12 +79,19 @@ def test_process_api_returns_sampling_stats_and_artifacts(
     assert preview["sampled_frames_count"] > 0
     assert len(preview["debug_frame_keys"]) > 0
     assert len(preview["debug_overlay_keys"]) > 0
+    assert len(preview["debug_mask_keys"]) > 0
     assert isinstance(preview["debug_crop_keys"], list)
+    assert isinstance(preview["debug_contact_sheet_keys"], list)
     assert preview["rows_count"] == 0
     assert preview["detections_count"] >= 0
     assert preview["crops_count"] >= 0
     assert preview["decode_attempts_count"] >= 0
     assert preview["decoded_symbols_count"] >= 0
+    assert preview["debug_masks_count"] == len(preview["debug_mask_keys"])
+    assert preview["debug_contact_sheets_count"] == len(preview["debug_contact_sheet_keys"])
+    assert preview["summary"]["debug_crops_count"] == len(preview["debug_crop_keys"])
+    assert preview["summary"]["debug_masks_count"] == len(preview["debug_mask_keys"])
+    assert preview["crop_quality_summary"]["count"] >= 0
     assert preview["video_metadata"]["frame_count"] == 10
     assert isinstance(preview["detections_by_frame"], dict)
     assert isinstance(preview["sample_detections"], list)
@@ -98,6 +109,9 @@ def test_process_api_returns_sampling_stats_and_artifacts(
     assert "HeuristicCandidateDetectionStage" in stage_names
     assert "CropExtractionStage" in stage_names
     assert "BarcodeQrDecodeStage" in stage_names
+    assert manifest["stats"]["debug_masks_count"] > 0
+    assert manifest["stats"]["debug_contact_sheets_count"] >= 0
+    assert manifest["stats"]["crop_quality_summary"]["count"] >= 0
 
     frame_sampling_stage = next(
         stage for stage in manifest["stages"] if stage["name"] == "FrameSamplingStage"
@@ -113,6 +127,8 @@ def test_process_api_returns_sampling_stats_and_artifacts(
     )
     assert heuristic_stage["status"] == "succeeded"
     assert heuristic_stage["output_summary"]["frames_processed"] > 0
+    assert heuristic_stage["output_summary"]["masks_saved"] > 0
+    assert heuristic_stage["output_summary"]["raw_contours_total"] >= 0
     crop_stage = next(
         stage
         for stage in manifest["stages"]
@@ -120,6 +136,8 @@ def test_process_api_returns_sampling_stats_and_artifacts(
     )
     assert crop_stage["status"] == "succeeded"
     assert crop_stage["output_summary"]["crops_count"] >= 0
+    assert crop_stage["output_summary"]["debug_contact_sheets_count"] >= 0
+    assert crop_stage["output_summary"]["crop_quality_summary"]["count"] >= 0
     decode_stage = next(
         stage
         for stage in manifest["stages"]
@@ -138,3 +156,9 @@ def test_process_api_returns_sampling_stats_and_artifacts(
         if key.startswith("outputs/job-api-123/debug/overlays/")
     )
     assert debug_overlay_keys
+    debug_mask_keys = sorted(
+        key
+        for key in in_memory_storage.objects
+        if key.startswith("outputs/job-api-123/debug/masks/")
+    )
+    assert debug_mask_keys

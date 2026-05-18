@@ -42,6 +42,9 @@ def test_crop_extraction_stage_saves_crops_and_quality_metadata(
         "debug_save_crops": True,
         "debug_crop_jpeg_quality": 90,
         "top_crops_preview_limit": 20,
+        "debug_save_contact_sheet": True,
+        "contact_sheet_top_n": 20,
+        "contact_sheet_thumb_width": 180,
     }
     pipeline_context.sampled_frames = [
         SampledFrameMetadata(
@@ -71,8 +74,12 @@ def test_crop_extraction_stage_saves_crops_and_quality_metadata(
 
     assert outcome.output_summary["crops_count"] == 1
     assert outcome.output_summary["debug_crops_count"] == 1
+    assert outcome.output_summary["debug_contact_sheets_count"] == 1
     assert len(pipeline_context.crop_candidates) == 1
     assert len(pipeline_context.debug_crop_keys) == 1
+    assert pipeline_context.debug_contact_sheet_keys == [
+        "outputs/job-123/debug/contact_sheets/top_crops.jpg"
+    ]
     crop = pipeline_context.crop_candidates[0]
     assert crop.source == "crop_extraction_v1"
     assert crop.crop_key == "outputs/job-123/debug/crops/frame_000001_det_000001.jpg"
@@ -81,7 +88,9 @@ def test_crop_extraction_stage_saves_crops_and_quality_metadata(
     assert crop.quality.score >= 0
     assert crop.padded_bbox.x_min <= crop.bbox.x_min
     assert crop.padded_bbox.y_min <= crop.bbox.y_min
+    assert outcome.output_summary["crop_quality_summary"]["count"] == 1
     assert crop.crop_key in in_memory_storage.objects
+    assert "outputs/job-123/debug/contact_sheets/top_crops.jpg" in in_memory_storage.objects
 
 
 def test_crop_extraction_stage_handles_empty_detections(
@@ -93,8 +102,11 @@ def test_crop_extraction_stage_handles_empty_detections(
     outcome = CropExtractionStage().run(pipeline_context)
 
     assert outcome.output_summary["crops_count"] == 0
+    assert outcome.output_summary["debug_contact_sheets_count"] == 0
+    assert outcome.output_summary["crop_quality_summary"]["count"] == 0
     assert pipeline_context.crop_candidates == []
     assert pipeline_context.debug_crop_keys == []
+    assert pipeline_context.debug_contact_sheet_keys == []
 
 
 def test_crop_extraction_stage_clips_out_of_bounds_bbox_without_failure(
@@ -113,6 +125,7 @@ def test_crop_extraction_stage_clips_out_of_bounds_bbox_without_failure(
         "min_crop_width": 20,
         "min_crop_height": 10,
         "debug_save_crops": True,
+        "debug_save_contact_sheet": True,
     }
     pipeline_context.sampled_frames = [
         SampledFrameMetadata(
@@ -145,3 +158,4 @@ def test_crop_extraction_stage_clips_out_of_bounds_bbox_without_failure(
     assert crop.bbox.x_max == 200
     assert crop.bbox.y_max == 100
     assert crop.crop_key in in_memory_storage.objects
+    assert "outputs/job-123/debug/contact_sheets/top_crops.jpg" in in_memory_storage.objects

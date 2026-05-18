@@ -5,6 +5,10 @@ from typing import Any
 from app.pipelines.base import BaseStage, PipelineContext, StageOutcome
 from app.pipelines.price_tag_cpu_v1.stages.barcode_qr_decode import BarcodeQrDecodeConfig
 from app.pipelines.price_tag_cpu_v1.stages.crop_extraction import CropExtractionConfig
+from app.pipelines.price_tag_cpu_v1.stages.frame_sampling import FrameSamplingConfig
+from app.pipelines.price_tag_cpu_v1.stages.heuristic_candidate_detection import (
+    CandidateDetectionConfig,
+)
 
 
 class PreviewWriterStage(BaseStage):
@@ -23,11 +27,19 @@ class PreviewWriterStage(BaseStage):
         }
 
     def run(self, context: PipelineContext) -> StageOutcome:
+        frame_sampling_config = FrameSamplingConfig.from_context(context)
+        detection_config = CandidateDetectionConfig.from_context(context)
         crop_config = CropExtractionConfig.from_context(context)
         decode_config = BarcodeQrDecodeConfig.from_context(context)
+        stats = context.build_stats()
         sampled_frames_preview = [
             frame.to_dict() for frame in context.sampled_frames[:5]
         ]
+        context.artifacts["debug_frame_keys"] = list(context.debug_frame_keys)
+        context.artifacts["debug_overlay_keys"] = list(context.debug_overlay_keys)
+        context.artifacts["debug_crop_keys"] = list(context.debug_crop_keys)
+        context.artifacts["debug_mask_keys"] = list(context.debug_mask_keys)
+        context.artifacts["debug_contact_sheet_keys"] = list(context.debug_contact_sheet_keys)
         preview_payload = {
             "job_id": context.job_id,
             "pipeline_name": context.pipeline_name,
@@ -37,12 +49,17 @@ class PreviewWriterStage(BaseStage):
             "sampled_frames_count": len(context.sampled_frames),
             "debug_frame_keys": list(context.debug_frame_keys),
             "debug_overlay_keys": list(context.debug_overlay_keys),
+            "debug_mask_keys": list(context.debug_mask_keys),
+            "debug_masks_count": stats["debug_masks_count"],
             "sampled_frames": sampled_frames_preview,
             "detections_count": len(context.detections),
             "detections_by_frame": context.detections_by_frame(),
             "sample_detections": context.serialize_detections(limit=10),
             "crops_count": len(context.crop_candidates),
             "debug_crop_keys": list(context.debug_crop_keys),
+            "debug_contact_sheet_keys": list(context.debug_contact_sheet_keys),
+            "debug_contact_sheets_count": stats["debug_contact_sheets_count"],
+            "crop_quality_summary": stats["crop_quality_summary"],
             "sample_crops": context.serialize_crops(
                 limit=crop_config.top_crops_preview_limit,
                 sort_by_quality=True,
@@ -54,11 +71,11 @@ class PreviewWriterStage(BaseStage):
                 limit=10,
                 max_payload_preview_length=decode_config.max_payload_preview_length,
             ),
+            "ocr_summary": context.artifacts.get("ocr_summary", {}),
             "rows_count": len(context.csv_rows),
             "message": (
-                "Price tag pipeline completed frame sampling, heuristic candidate detection, "
-                "crop extraction, and local QR/barcode decode attempts. "
-                "CSV rows remain empty until later recognition stages."
+                "Price tag pipeline completed frame sampling, detection, crop extraction, "
+                "QR/barcode decode, OCR, and row fusion stages."
             ),
             "artifacts": {
                 "csv_key": context.artifacts.get("csv_key", context.artifact_writer.csv_key),
@@ -68,24 +85,19 @@ class PreviewWriterStage(BaseStage):
                 "debug_frame_keys": list(context.debug_frame_keys),
                 "debug_overlay_keys": list(context.debug_overlay_keys),
                 "debug_crop_keys": list(context.debug_crop_keys),
+                "debug_mask_keys": list(context.debug_mask_keys),
+                "debug_contact_sheet_keys": list(context.debug_contact_sheet_keys),
             },
-            "summary": {
-                "frame_count": context.video_metadata.frame_count or 0,
-                "frames_processed": context.frames_processed,
-                "sampled_frames_count": len(context.sampled_frames),
-                "debug_frames_count": len(context.debug_frame_keys),
-                "debug_overlays_count": len(context.debug_overlay_keys),
-                "debug_crops_count": len(context.debug_crop_keys),
-                "detections_total": len(context.detections),
-                "detections_by_frame_count": len(context.detections_by_frame()),
-                "crops_total": len(context.crop_candidates),
-                "decode_attempts_total": len(context.decode_attempts),
-                "decoded_symbols_total": len(context.decoded_symbols),
-                "decoded_qr_total": context.decoded_symbols_by_type()["qr"],
-                "decoded_barcode_total": context.decoded_symbols_by_type()["barcode"],
-                "final_rows": len(context.csv_rows),
+            "debug_status": {
+                "frames_enabled": frame_sampling_config.debug_save_frames,
+                "overlays_enabled": detection_config.debug_save_overlays,
+                "masks_enabled": detection_config.debug_save_masks,
+                "rejected_preview_enabled": detection_config.debug_save_rejected,
+                "crops_enabled": crop_config.debug_save_crops,
+                "contact_sheet_enabled": crop_config.debug_save_contact_sheet,
             },
-            "rows": [],
+            "summary": stats,
+            "rows": context.csv_rows[:25],
         }
 
         preview_key = context.artifact_writer.upload_json("preview.json", preview_payload)

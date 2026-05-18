@@ -18,27 +18,33 @@ frame_sampling:
 
 candidate_detection:
   enabled: true
-  source: heuristic_color_geometry_v1
-  max_candidates_per_frame: 50
-  min_area_ratio: 0.00005
-  max_area_ratio: 0.08
-  min_aspect_ratio: 1.2
-  max_aspect_ratio: 8.0
+  source: heuristic_color_geometry_v2
+  max_candidates_per_frame: 24
+  min_area_ratio: 0.00008
+  max_area_ratio: 0.12
+  min_aspect_ratio: 1.5
+  max_aspect_ratio: 9.5
   nms_iou_threshold: 0.4
   debug_save_overlays: true
   debug_overlay_jpeg_quality: 85
+  debug_save_masks: true
+  debug_save_rejected: false
+  top_rejected_preview_limit: 20
 
 crop_extraction:
   enabled: true
   source: crop_extraction_v1
-  bbox_padding_ratio: 0.08
+  bbox_padding_ratio: 0.1
   min_crop_width: 24
   min_crop_height: 16
-  max_crops_per_frame: 50
-  max_total_crops: 300
+  max_crops_per_frame: 16
+  max_total_crops: 120
   debug_save_crops: true
   debug_crop_jpeg_quality: 90
   top_crops_preview_limit: 20
+  debug_save_contact_sheet: true
+  contact_sheet_top_n: 40
+  contact_sheet_thumb_width: 180
 
 barcode_qr_decode:
   enabled: true

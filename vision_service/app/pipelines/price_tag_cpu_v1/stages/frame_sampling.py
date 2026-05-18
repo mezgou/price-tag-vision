@@ -19,10 +19,28 @@ from app.pipelines.price_tag_cpu_v1.orientation import (
     apply_orientation,
     resolve_orientation_mode,
 )
+from app.utils.camera import CameraModel
 from app.utils.image_processing import resize_to_max_width
 
 FrameArray = NDArray[np.uint8]
 DEFAULT_DEBUG_MAX_WIDTH = 1280
+# When the camera model is active we keep frames near full resolution so
+# QR / OCR crops stay sharp; the detector letterboxes internally anyway.
+CAMERA_RUNTIME_MAX_WIDTH = 4096
+
+
+def build_camera_model(context: PipelineContext) -> CameraModel | None:
+    """Return a CameraModel when ``camera.undistort`` is enabled in config."""
+    raw = context.config.get("camera", {})
+    if not isinstance(raw, dict):
+        return None
+    flag = raw.get("undistort")
+    enabled = flag if isinstance(flag, bool) else str(flag).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    if not enabled:
+        return None
+    return CameraModel()
 
 
 @dataclass(slots=True)
@@ -109,6 +127,7 @@ class FrameSamplingStage(BaseStage):
 
         config = FrameSamplingConfig.from_context(context)
         warnings = list(config.warnings)
+        camera = build_camera_model(context)
 
         capture = cv2.VideoCapture(str(context.local_video_path))
         if not capture.isOpened():
@@ -152,6 +171,7 @@ class FrameSamplingStage(BaseStage):
                     source_fps=source_fps,
                     sequence_number=len(sampled_frames) + 1,
                     config=config,
+                    camera=camera,
                 )
                 sampled_frames.append(sampled_frame)
                 if debug_frame_key is not None:
@@ -188,12 +208,20 @@ class FrameSamplingStage(BaseStage):
         source_fps: float | None,
         sequence_number: int,
         config: FrameSamplingConfig,
+        camera: CameraModel | None = None,
     ) -> tuple[SampledFrameMetadata, str | None]:
         original_height, original_width = frame.shape[:2]
-        oriented_frame = apply_orientation(frame, config.orientation_mode)
+        if camera is not None:
+            oriented_frame = camera.raw_frame_to_processed(frame)
+            orientation_applied = "undistort_rotate_90_ccw"
+            max_width = CAMERA_RUNTIME_MAX_WIDTH
+        else:
+            oriented_frame = apply_orientation(frame, config.orientation_mode)
+            orientation_applied = config.orientation_mode
+            max_width = DEFAULT_DEBUG_MAX_WIDTH
         processed_frame = resize_to_max_width(
             oriented_frame,
-            max_width=DEFAULT_DEBUG_MAX_WIDTH,
+            max_width=max_width,
         )
         processed_height, processed_width = processed_frame.shape[:2]
 
@@ -219,7 +247,7 @@ class FrameSamplingStage(BaseStage):
             original_height=original_height,
             processed_width=processed_width,
             processed_height=processed_height,
-            orientation_applied=config.orientation_mode,
+            orientation_applied=orientation_applied,
             debug_frame_key=debug_frame_key,
             local_frame_path=local_frame_path,
         )

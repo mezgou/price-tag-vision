@@ -12,6 +12,12 @@ def test_debug_manifest_contains_expected_structure(
     in_memory_storage,
 ) -> None:
     pipeline_context.finished_at = utc_now()
+    pipeline_context.debug_mask_keys = [
+        "outputs/job-123/debug/masks/frame_000001_white_mask.jpg"
+    ]
+    pipeline_context.debug_contact_sheet_keys = [
+        "outputs/job-123/debug/contact_sheets/top_crops.jpg"
+    ]
     pipeline_context.stage_reports.append(
         StageExecution(
             name="FrameMetadataStage",
@@ -42,11 +48,20 @@ def test_debug_manifest_contains_expected_structure(
     assert isinstance(manifest["warnings"], list)
     assert manifest["stats"]["debug_overlays_count"] == 0
     assert manifest["stats"]["debug_crops_count"] == 0
+    assert manifest["stats"]["debug_masks_count"] == 1
+    assert manifest["stats"]["debug_contact_sheets_count"] == 1
     assert manifest["stats"]["detections_by_frame_count"] == 0
     assert manifest["stats"]["crops_total"] == 0
+    assert manifest["stats"]["crop_quality_summary"]["count"] == 0
     assert manifest["stats"]["decode_attempts_total"] == 0
     assert manifest["stats"]["decoded_symbols_total"] == 0
+    assert manifest["artifacts"]["debug_contact_sheet_keys"] == [
+        "outputs/job-123/debug/contact_sheets/top_crops.jpg"
+    ]
     assert manifest["stages"][0]["name"] == "FrameMetadataStage"
     assert manifest["stages"][-1]["name"] == "DebugManifestStage"
+    assert manifest["stages"][-1]["output_summary"]["debug_masks_count"] == 1
+    assert manifest["stages"][-1]["output_summary"]["debug_contact_sheets_count"] == 1
+    assert manifest["stages"][-1]["output_summary"]["crop_quality_summary"]["count"] == 0
     assert isinstance(manifest["stages"][-1]["warnings"], list)
     assert isinstance(manifest["stages"][-1]["errors"], list)

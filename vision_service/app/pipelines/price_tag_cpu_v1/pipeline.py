@@ -84,6 +84,8 @@ class PriceTagCpuV1Pipeline(BasePipeline):
                     "debug_frame_keys": [],
                     "debug_overlay_keys": [],
                     "debug_crop_keys": [],
+                    "debug_mask_keys": [],
+                    "debug_contact_sheet_keys": [],
                 },
             )
 

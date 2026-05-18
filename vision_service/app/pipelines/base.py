@@ -12,8 +12,9 @@ from app.schemas.detections import (
     DecodedSymbol,
     DetectionCandidate,
 )
-from app.utils.decoding import build_payload_preview
 from app.utils.artifacts import ArtifactWriter
+from app.utils.decoding import build_payload_preview
+from app.utils.reporting import build_crop_quality_summary
 from app.utils.timing import utc_now
 
 
@@ -122,6 +123,8 @@ class PipelineContext:
     debug_frame_keys: list[str] = field(default_factory=list)
     debug_overlay_keys: list[str] = field(default_factory=list)
     debug_crop_keys: list[str] = field(default_factory=list)
+    debug_mask_keys: list[str] = field(default_factory=list)
+    debug_contact_sheet_keys: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[dict[str, Any]] = field(default_factory=list)
     stage_reports: list[StageExecution] = field(default_factory=list)
@@ -138,6 +141,14 @@ class PipelineContext:
         stage_reports = [report.to_dict() for report in self.stage_reports]
         if extra_stages:
             stage_reports.extend(report.to_dict() for report in extra_stages)
+        artifacts = {
+            **self.artifacts,
+            "debug_frame_keys": list(self.debug_frame_keys),
+            "debug_overlay_keys": list(self.debug_overlay_keys),
+            "debug_crop_keys": list(self.debug_crop_keys),
+            "debug_mask_keys": list(self.debug_mask_keys),
+            "debug_contact_sheet_keys": list(self.debug_contact_sheet_keys),
+        }
 
         return {
             "job_id": self.job_id,
@@ -148,7 +159,7 @@ class PipelineContext:
             "stages": stage_reports,
             "video_metadata": self.video_metadata.to_dict(),
             "config": self.config,
-            "artifacts": self.artifacts,
+            "artifacts": artifacts,
             "stats": self.build_stats(),
             "errors": self.errors,
             "warnings": self.warnings,
@@ -218,6 +229,7 @@ class PipelineContext:
                 0,
             )
 
+        crop_quality_summary = build_crop_quality_summary(self.crop_candidates)
         return {
             "pipeline_name": self.pipeline_name,
             "pipeline_version": self.pipeline_version,
@@ -226,6 +238,8 @@ class PipelineContext:
             "debug_frames_count": len(self.debug_frame_keys),
             "debug_overlays_count": len(self.debug_overlay_keys),
             "debug_crops_count": len(self.debug_crop_keys),
+            "debug_masks_count": len(self.debug_mask_keys),
+            "debug_contact_sheets_count": len(self.debug_contact_sheet_keys),
             "frame_count": self.video_metadata.frame_count or 0,
             "detections_total": len(self.detections),
             "detections_by_frame_count": len(self.detections_by_frame()),
@@ -234,6 +248,7 @@ class PipelineContext:
             "decoded_symbols_total": len(self.decoded_symbols),
             "decoded_qr_total": self.decoded_symbols_by_type()["qr"],
             "decoded_barcode_total": self.decoded_symbols_by_type()["barcode"],
+            "crop_quality_summary": crop_quality_summary,
             "final_rows": len(self.csv_rows),
             "duration_ms": duration_ms,
         }

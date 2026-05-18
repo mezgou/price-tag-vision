@@ -37,11 +37,27 @@ def test_preview_writer_includes_sampling_metadata(
     pipeline_context.debug_overlay_keys = [
         "outputs/job-123/debug/overlays/frame_000001_detections.jpg"
     ]
+    pipeline_context.debug_mask_keys = [
+        "outputs/job-123/debug/masks/frame_000001_white_mask.jpg",
+        "outputs/job-123/debug/masks/frame_000001_accent_mask.jpg",
+        "outputs/job-123/debug/masks/frame_000001_combined_mask.jpg",
+    ]
     pipeline_context.debug_crop_keys = [
         "outputs/job-123/debug/crops/frame_000001_det_000001.jpg"
     ]
+    pipeline_context.debug_contact_sheet_keys = [
+        "outputs/job-123/debug/contact_sheets/top_crops.jpg"
+    ]
     pipeline_context.config["crop_extraction"] = {
         "top_crops_preview_limit": 20,
+        "debug_save_crops": True,
+        "debug_save_contact_sheet": True,
+    }
+    pipeline_context.config["frame_sampling"] = {"debug_save_frames": True}
+    pipeline_context.config["candidate_detection"] = {
+        "debug_save_overlays": True,
+        "debug_save_masks": True,
+        "debug_save_rejected": False,
     }
     pipeline_context.config["barcode_qr_decode"] = {
         "max_payload_preview_length": 50,
@@ -121,8 +137,16 @@ def test_preview_writer_includes_sampling_metadata(
     assert preview["debug_overlay_keys"] == [
         "outputs/job-123/debug/overlays/frame_000001_detections.jpg"
     ]
+    assert preview["debug_mask_keys"] == [
+        "outputs/job-123/debug/masks/frame_000001_white_mask.jpg",
+        "outputs/job-123/debug/masks/frame_000001_accent_mask.jpg",
+        "outputs/job-123/debug/masks/frame_000001_combined_mask.jpg",
+    ]
     assert preview["debug_crop_keys"] == [
         "outputs/job-123/debug/crops/frame_000001_det_000001.jpg"
+    ]
+    assert preview["debug_contact_sheet_keys"] == [
+        "outputs/job-123/debug/contact_sheets/top_crops.jpg"
     ]
     assert preview["sampled_frames"][0]["orientation_applied"] == "rotate_90_ccw"
     assert preview["video_metadata"]["filename"] == "input.mp4"
@@ -133,8 +157,24 @@ def test_preview_writer_includes_sampling_metadata(
     assert preview["crops_count"] == 1
     assert preview["sample_crops"][0]["crop_id"] == "frame_000000_crop_000001"
     assert preview["sample_crops"][0]["quality"]["score"] == 0.82
+    assert preview["crop_quality_summary"]["count"] == 1
     assert preview["decode_attempts_count"] == 1
     assert preview["decoded_symbols_count"] == 1
     assert preview["decoded_symbols_by_type"] == {"qr": 1, "barcode": 0, "unknown": 0}
     assert preview["sample_decoded_symbols"][0]["symbol_type"] == "qr"
     assert preview["sample_decoded_symbols"][0]["payload_preview"] == "https://example.test/preview"
+    assert preview["debug_masks_count"] == 3
+    assert preview["debug_contact_sheets_count"] == 1
+    assert preview["summary"]["debug_crops_count"] == len(preview["debug_crop_keys"])
+    assert preview["summary"]["debug_masks_count"] == len(preview["debug_mask_keys"])
+    assert preview["summary"]["debug_contact_sheets_count"] == len(
+        preview["debug_contact_sheet_keys"]
+    )
+    assert preview["debug_status"] == {
+        "frames_enabled": True,
+        "overlays_enabled": True,
+        "masks_enabled": True,
+        "rejected_preview_enabled": False,
+        "crops_enabled": True,
+        "contact_sheet_enabled": True,
+    }

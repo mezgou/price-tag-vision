@@ -14,8 +14,12 @@ from app.utils.image_processing import (
     compute_crop_quality,
     expand_and_clip_bbox,
 )
+from app.utils.reporting import build_crop_quality_summary
 
 DEFAULT_CROP_SOURCE = "crop_extraction_v1"
+CONTACT_SHEET_BACKGROUND = (248, 248, 248)
+CONTACT_SHEET_TEXT = (28, 28, 28)
+CONTACT_SHEET_ACCENT = (0, 190, 255)
 
 
 @dataclass(slots=True)
@@ -30,6 +34,9 @@ class CropExtractionConfig:
     debug_save_crops: bool
     debug_crop_jpeg_quality: int
     top_crops_preview_limit: int
+    debug_save_contact_sheet: bool
+    contact_sheet_top_n: int
+    contact_sheet_thumb_width: int
     warnings: list[str]
 
     @classmethod
@@ -58,7 +65,7 @@ class CropExtractionConfig:
             ),
             bbox_padding_ratio=_coerce_ratio_inclusive_zero(
                 raw_config.get("bbox_padding_ratio"),
-                default=0.08,
+                default=0.1,
                 field_name="bbox_padding_ratio",
                 warnings=warnings,
             ),
@@ -76,13 +83,13 @@ class CropExtractionConfig:
             ),
             max_crops_per_frame=_coerce_positive_int(
                 raw_config.get("max_crops_per_frame"),
-                default=50,
+                default=16,
                 field_name="max_crops_per_frame",
                 warnings=warnings,
             ),
             max_total_crops=_coerce_positive_int(
                 raw_config.get("max_total_crops"),
-                default=300,
+                default=120,
                 field_name="max_total_crops",
                 warnings=warnings,
             ),
@@ -104,6 +111,24 @@ class CropExtractionConfig:
                 field_name="top_crops_preview_limit",
                 warnings=warnings,
             ),
+            debug_save_contact_sheet=_coerce_bool(
+                raw_config.get("debug_save_contact_sheet"),
+                default=True,
+                field_name="debug_save_contact_sheet",
+                warnings=warnings,
+            ),
+            contact_sheet_top_n=_coerce_positive_int(
+                raw_config.get("contact_sheet_top_n"),
+                default=40,
+                field_name="contact_sheet_top_n",
+                warnings=warnings,
+            ),
+            contact_sheet_thumb_width=_coerce_positive_int(
+                raw_config.get("contact_sheet_thumb_width"),
+                default=180,
+                field_name="contact_sheet_thumb_width",
+                warnings=warnings,
+            ),
             warnings=warnings,
         )
 
@@ -122,6 +147,7 @@ class CropExtractionStage(BaseStage):
             "bbox_padding_ratio": config.bbox_padding_ratio,
             "source": config.source,
             "debug_save_crops": config.debug_save_crops,
+            "debug_save_contact_sheet": config.debug_save_contact_sheet,
         }
 
     def run(self, context: PipelineContext) -> StageOutcome:
@@ -129,38 +155,19 @@ class CropExtractionStage(BaseStage):
         warnings = list(config.warnings)
 
         if not config.enabled:
-            context.crop_candidates = []
-            context.debug_crop_keys = []
-            context.artifacts["debug_crop_keys"] = []
-            return StageOutcome(
-                output_summary={
-                    "enabled": False,
-                    "crops_count": 0,
-                    "debug_crops_count": 0,
-                    "skipped_crops_count": 0,
-                },
-                warnings=warnings,
-            )
+            return _reset_crop_outputs(context=context, enabled=False, warnings=warnings)
 
         if not context.detections:
-            context.crop_candidates = []
-            context.debug_crop_keys = []
-            context.artifacts["debug_crop_keys"] = []
-            return StageOutcome(
-                output_summary={
-                    "enabled": True,
-                    "crops_count": 0,
-                    "debug_crops_count": 0,
-                    "skipped_crops_count": 0,
-                },
-                warnings=warnings,
-            )
+            return _reset_crop_outputs(context=context, enabled=True, warnings=warnings)
 
         frame_lookup = _build_frame_lookup(context.sampled_frames)
         frame_crop_counts: dict[int, int] = defaultdict(int)
         crop_candidates: list[CropCandidate] = []
         debug_crop_keys: list[str] = []
+        debug_contact_sheet_keys: list[str] = []
+        contact_sheet_items: list[tuple[CropCandidate, np.ndarray]] = []
         skipped_crops_count = 0
+        max_total_limit_warning_emitted = False
 
         for detection in sorted(
             context.detections,
@@ -168,10 +175,12 @@ class CropExtractionStage(BaseStage):
         ):
             if len(crop_candidates) >= config.max_total_crops:
                 skipped_crops_count += 1
-                warnings.append(
-                    "Crop extraction reached max_total_crops limit; remaining detections were skipped."
-                )
-                break
+                if not max_total_limit_warning_emitted:
+                    warnings.append(
+                        "Crop extraction reached max_total_crops limit; remaining detections were skipped."
+                    )
+                    max_total_limit_warning_emitted = True
+                continue
 
             frame_entry = frame_lookup.get(detection.frame_index)
             if frame_entry is None:
@@ -194,7 +203,7 @@ class CropExtractionStage(BaseStage):
                 )
                 continue
 
-            crop_candidate, crop_warning = _build_crop_candidate(
+            crop_candidate, crop_image, crop_warning = _build_crop_candidate(
                 context=context,
                 frame=frame,
                 frame_meta=frame_meta,
@@ -209,25 +218,68 @@ class CropExtractionStage(BaseStage):
                 continue
 
             assert crop_candidate is not None
+            assert crop_image is not None
             crop_candidates.append(crop_candidate)
             frame_crop_counts[detection.frame_index] += 1
-            if config.debug_save_crops:
+            contact_sheet_items.append((crop_candidate, crop_image))
+            if config.debug_save_crops and crop_candidate.crop_key:
                 debug_crop_keys.append(crop_candidate.crop_key)
+
+        if config.debug_save_contact_sheet and contact_sheet_items:
+            contact_sheet_key = _upload_contact_sheet(
+                context=context,
+                contact_sheet_items=contact_sheet_items,
+                top_n=config.contact_sheet_top_n,
+                thumb_width=config.contact_sheet_thumb_width,
+                jpeg_quality=config.debug_crop_jpeg_quality,
+            )
+            debug_contact_sheet_keys.append(contact_sheet_key)
 
         context.crop_candidates = crop_candidates
         context.debug_crop_keys = debug_crop_keys
+        context.debug_contact_sheet_keys = debug_contact_sheet_keys
         context.artifacts["debug_crop_keys"] = list(debug_crop_keys)
+        context.artifacts["debug_contact_sheet_keys"] = list(debug_contact_sheet_keys)
 
+        crop_quality_summary = build_crop_quality_summary(crop_candidates)
         return StageOutcome(
             output_summary={
                 "enabled": True,
                 "crops_count": len(crop_candidates),
                 "debug_crops_count": len(debug_crop_keys),
+                "debug_contact_sheets_count": len(debug_contact_sheet_keys),
                 "skipped_crops_count": skipped_crops_count,
                 "source": config.source,
+                "contact_sheet_keys": list(debug_contact_sheet_keys),
+                "crop_quality_summary": crop_quality_summary,
             },
             warnings=warnings,
         )
+
+
+def _reset_crop_outputs(
+    *,
+    context: PipelineContext,
+    enabled: bool,
+    warnings: list[str],
+) -> StageOutcome:
+    context.crop_candidates = []
+    context.debug_crop_keys = []
+    context.debug_contact_sheet_keys = []
+    context.artifacts["debug_crop_keys"] = []
+    context.artifacts["debug_contact_sheet_keys"] = []
+    return StageOutcome(
+        output_summary={
+            "enabled": enabled,
+            "crops_count": 0,
+            "debug_crops_count": 0,
+            "debug_contact_sheets_count": 0,
+            "skipped_crops_count": 0,
+            "contact_sheet_keys": [],
+            "crop_quality_summary": build_crop_quality_summary([]),
+        },
+        warnings=warnings,
+    )
 
 
 def _build_frame_lookup(
@@ -254,7 +306,7 @@ def _build_crop_candidate(
     detection: DetectionCandidate,
     crop_index: int,
     config: CropExtractionConfig,
-) -> tuple[CropCandidate | None, str | None]:
+) -> tuple[CropCandidate | None, np.ndarray | None, str | None]:
     frame_height, frame_width = frame.shape[:2]
     clipped_bbox = clip_bbox_to_frame(
         detection.bbox,
@@ -262,7 +314,7 @@ def _build_crop_candidate(
         frame_height=frame_height,
     )
     if clipped_bbox is None:
-        return None, (
+        return None, None, (
             f"Detection {detection.detection_id} bbox is outside frame bounds after clipping."
         )
 
@@ -278,13 +330,13 @@ def _build_crop_candidate(
         padded_bbox.x_min : padded_bbox.x_max,
     ]
     if crop.size == 0:
-        return None, (
+        return None, None, (
             f"Detection {detection.detection_id} produced an empty crop after clipping."
         )
 
     crop_height, crop_width = crop.shape[:2]
     if crop_width < config.min_crop_width or crop_height < config.min_crop_height:
-        return None, (
+        return None, None, (
             f"Detection {detection.detection_id} crop is too small "
             f"({crop_width}x{crop_height}) after clipping/padding."
         )
@@ -299,10 +351,7 @@ def _build_crop_candidate(
             jpeg_quality=config.debug_crop_jpeg_quality,
         )
 
-    quality = compute_crop_quality(
-        crop,
-        frame_area=frame_width * frame_height,
-    )
+    quality = compute_crop_quality(crop, frame_area=frame_width * frame_height)
     crop_id = f"frame_{frame_meta.frame_index:06d}_crop_{crop_index:06d}"
 
     return (
@@ -319,10 +368,13 @@ def _build_crop_candidate(
             quality=quality,
             source=config.source,
             attributes={
+                **detection.attributes,
                 "label": detection.label,
                 "detection_confidence": detection.confidence,
+                "detection_source": detection.source,
             },
         ),
+        crop.copy(),
         None,
     )
 
@@ -345,13 +397,135 @@ def _upload_crop(
             f"Failed to encode crop for frame {frame_sequence_number} detection {crop_index}."
         )
     return context.artifact_writer.upload_bytes(
-        (
-            f"debug/crops/frame_{frame_sequence_number:06d}_"
-            f"det_{crop_index:06d}.jpg"
-        ),
+        f"debug/crops/frame_{frame_sequence_number:06d}_det_{crop_index:06d}.jpg",
         encoded.tobytes(),
         "image/jpeg",
     )
+
+
+def _upload_contact_sheet(
+    *,
+    context: PipelineContext,
+    contact_sheet_items: list[tuple[CropCandidate, np.ndarray]],
+    top_n: int,
+    thumb_width: int,
+    jpeg_quality: int,
+) -> str:
+    top_items = sorted(
+        contact_sheet_items,
+        key=lambda item: item[0].quality.score,
+        reverse=True,
+    )[:top_n]
+    sheet_image = _build_contact_sheet_image(top_items=top_items, thumb_width=thumb_width)
+    success, encoded = cv2.imencode(
+        ".jpg",
+        sheet_image,
+        [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality],
+    )
+    if not success:
+        raise RuntimeError("Failed to encode crop contact sheet as JPEG.")
+    return context.artifact_writer.upload_bytes(
+        "debug/contact_sheets/top_crops.jpg",
+        encoded.tobytes(),
+        "image/jpeg",
+    )
+
+
+def _build_contact_sheet_image(
+    *,
+    top_items: list[tuple[CropCandidate, np.ndarray]],
+    thumb_width: int,
+) -> np.ndarray:
+    if not top_items:
+        return np.full((64, 64, 3), CONTACT_SHEET_BACKGROUND, dtype=np.uint8)
+
+    padding = 12
+    thumb_height = max(int(round(thumb_width * 0.72)), 90)
+    text_block_height = 42
+    columns = min(4, max(1, int(np.ceil(np.sqrt(len(top_items))))))
+    rows = int(np.ceil(len(top_items) / columns))
+    cell_width = thumb_width + (padding * 2)
+    cell_height = thumb_height + text_block_height + (padding * 2)
+    canvas = np.full(
+        (rows * cell_height, columns * cell_width, 3),
+        CONTACT_SHEET_BACKGROUND,
+        dtype=np.uint8,
+    )
+
+    for item_index, (crop_candidate, crop_image) in enumerate(top_items):
+        row_index = item_index // columns
+        column_index = item_index % columns
+        origin_x = column_index * cell_width
+        origin_y = row_index * cell_height
+
+        thumbnail = _fit_image_to_box(
+            image=crop_image,
+            target_width=thumb_width,
+            target_height=thumb_height,
+        )
+        text_origin_y = origin_y + padding + 14
+        cv2.putText(
+            canvas,
+            f"#{item_index + 1:02d} f={crop_candidate.frame_index} d={crop_candidate.attributes.get('detection_confidence', 0.0):.2f}",
+            (origin_x + padding, text_origin_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            CONTACT_SHEET_TEXT,
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            canvas,
+            f"q={crop_candidate.quality.score:.2f} {crop_candidate.width}x{crop_candidate.height}",
+            (origin_x + padding, text_origin_y + 16),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            CONTACT_SHEET_TEXT,
+            1,
+            cv2.LINE_AA,
+        )
+
+        thumb_origin_y = origin_y + padding + text_block_height
+        thumb_origin_x = origin_x + padding
+        canvas[
+            thumb_origin_y : thumb_origin_y + thumb_height,
+            thumb_origin_x : thumb_origin_x + thumb_width,
+        ] = thumbnail
+        cv2.rectangle(
+            canvas,
+            (thumb_origin_x, thumb_origin_y),
+            (thumb_origin_x + thumb_width - 1, thumb_origin_y + thumb_height - 1),
+            CONTACT_SHEET_ACCENT,
+            1,
+        )
+
+    return canvas
+
+
+def _fit_image_to_box(
+    *,
+    image: np.ndarray,
+    target_width: int,
+    target_height: int,
+) -> np.ndarray:
+    canvas = np.full(
+        (target_height, target_width, 3),
+        CONTACT_SHEET_BACKGROUND,
+        dtype=np.uint8,
+    )
+    source_height, source_width = image.shape[:2]
+    if source_height <= 0 or source_width <= 0:
+        return canvas
+
+    scale = min(target_width / float(source_width), target_height / float(source_height))
+    resized_width = max(int(round(source_width * scale)), 1)
+    resized_height = max(int(round(source_height * scale)), 1)
+    resized = cv2.resize(image, (resized_width, resized_height), interpolation=cv2.INTER_AREA)
+
+    offset_x = (target_width - resized_width) // 2
+    offset_y = (target_height - resized_height) // 2
+    canvas[offset_y : offset_y + resized_height, offset_x : offset_x + resized_width] = resized
+    return canvas
 
 
 def _coerce_bool(
@@ -425,9 +599,7 @@ def _coerce_ratio_inclusive_zero(
         warnings.append(f"Invalid {field_name} '{value}'. Falling back to {default}.")
         return default
     if coerced < 0 or coerced > 1:
-        warnings.append(
-            f"{field_name} must be within [0, 1]. Falling back to {default}."
-        )
+        warnings.append(f"{field_name} must be within [0, 1]. Falling back to {default}.")
         return default
     return coerced
 

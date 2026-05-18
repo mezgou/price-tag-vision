@@ -1,0 +1,142 @@
+pipeline:
+  name: price_tag_v2
+  version: "0.3.0"
+
+runtime:
+  device: cpu
+  debug: true
+
+video:
+  metadata_backend: opencv
+
+# Lens-distortion correction. When enabled, frames are processed in
+# undistorted + 90deg-CCW upright space (best for detector / QR / OCR) and
+# the final CSV bbox is mapped back to raw distorted 3840x2160 coords.
+camera:
+  undistort: true
+
+frame_sampling:
+  sample_fps: 5.0
+  max_frames: 600
+  orientation_mode: none
+  debug_save_frames: true
+  debug_jpeg_quality: 88
+
+yolo_detection:
+  enabled: true
+  weights_path: runs/detect/train/weights/best.pt
+  fallback_weights_path: artifacts/models/price_tag_yolo11s_undistort_v2/weights/best.pt
+  source: yolov8m_price_tag_runs_train
+  confidence_threshold: 0.20
+  iou_threshold: 0.50
+  imgsz: 1280
+  device: "0"
+  max_detections_per_frame: 32
+
+candidate_detection:
+  enabled: true
+  fallback_only: true
+  source: heuristic_color_geometry_v2_fallback
+  max_candidates_per_frame: 24
+  min_area_ratio: 0.00008
+  max_area_ratio: 0.12
+  min_aspect_ratio: 0.35
+  max_aspect_ratio: 9.5
+  nms_iou_threshold: 0.4
+  debug_save_overlays: true
+  debug_overlay_jpeg_quality: 85
+  debug_save_masks: true
+  debug_save_rejected: false
+  top_rejected_preview_limit: 20
+
+tracking:
+  enabled: true
+  source: simple_iou_center_tracker_v1
+  iou_threshold: 0.18
+  center_distance_ratio: 0.65
+  max_time_gap_ms: 2500
+
+crop_extraction:
+  enabled: true
+  source: crop_extraction_top_quality_v2
+  bbox_padding_ratio: 0.12
+  min_crop_width: 50
+  min_crop_height: 50
+  max_crops_per_frame: 32
+  max_total_crops: 600
+  debug_save_crops: true
+  debug_crop_jpeg_quality: 92
+  top_crops_preview_limit: 40
+  debug_save_contact_sheet: true
+  contact_sheet_top_n: 80
+  contact_sheet_thumb_width: 180
+
+top_k_crop_selection:
+  enabled: true
+  max_crops_per_track: 10
+  max_total_crops: 1500
+  min_quality_score: 0.05
+
+barcode_qr_decode:
+  enabled: true
+  max_crops: 1500
+  min_crop_quality_score: 0.05
+  # QR is non-critical (~2% decodable at this camera distance, task spec
+  # 13.4) so the cascade is kept lean: zxing+pyzbar (strongest/fastest) on a
+  # few upscaled variants only. The full opencv/aruco x 13-variant cascade
+  # cost ~30 min for ~0 extra hits.
+  decoders:
+    opencv_qr_detector:
+      enabled: false
+    optional_zxingcpp:
+      enabled: true
+    optional_pyzbar:
+      enabled: true
+    optional_aruco:
+      enabled: false
+  variants:
+    original: true
+    grayscale: true
+    clahe: false
+    sharpened: false
+    resized_x2: true
+    resized_x3: true
+    resized_x4: false
+    adaptive_threshold: false
+    right_angle_rotations: false
+    small_angle_rotations: false
+  stop_after_first_success_per_crop: true
+  max_payload_preview_length: 500
+
+zonal_ocr:
+  enabled: true
+  max_crops: 1500
+  min_crop_quality_score: 0.08
+  engine_order:
+    - paddle
+    - tesseract
+  tesseract_lang: rus+eng
+
+row_fusion:
+  enabled: true
+  include_undecoded_detections: true
+  default_absent_value: нет
+
+artifacts:
+  csv: result.csv
+  preview: preview.json
+  manifest: debug/pipeline_manifest.json
+
+stages:
+  - FrameMetadataStage
+  - FrameSamplingStage
+  - YoloByteTrackStage
+  - FallbackHeuristicCandidateDetectionStage
+  - CropExtractionStage
+  - TopKCropSelectionStage
+  - BarcodeQrDecodeStage
+  - ZonalOcrStage
+  - RowFusionStage
+  - CsvWriterStage
+  - PreviewWriterStage
+  - DebugManifestStage

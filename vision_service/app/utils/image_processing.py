@@ -110,18 +110,22 @@ def non_max_suppress_boxes(
 def build_candidate_masks(
     frame: FrameArray,
 ) -> tuple[NDArray[np.uint8], NDArray[np.uint8], NDArray[np.uint8]]:
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    blurred = cv2.GaussianBlur(frame, (5, 5), 0)
+    hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
 
-    white_mask = cv2.inRange(hsv, (0, 0, 150), (180, 80, 255))
-    yellow_mask = cv2.inRange(hsv, (12, 70, 120), (38, 255, 255))
-    orange_mask = cv2.inRange(hsv, (4, 80, 120), (24, 255, 255))
+    white_mask = cv2.inRange(hsv, (0, 0, 145), (180, 92, 255))
+    yellow_mask = cv2.inRange(hsv, (12, 55, 110), (40, 255, 255))
+    orange_mask = cv2.inRange(hsv, (4, 70, 110), (24, 255, 255))
     accent_mask = cv2.bitwise_or(yellow_mask, orange_mask)
 
-    candidate_mask = cv2.bitwise_or(white_mask, cv2.dilate(accent_mask, np.ones((5, 5), np.uint8), iterations=1))
+    candidate_mask = cv2.bitwise_or(
+        white_mask,
+        cv2.dilate(accent_mask, np.ones((5, 5), np.uint8), iterations=1),
+    )
     candidate_mask = cv2.morphologyEx(
         candidate_mask,
         cv2.MORPH_CLOSE,
-        np.ones((9, 5), np.uint8),
+        np.ones((13, 5), np.uint8),
         iterations=1,
     )
     candidate_mask = cv2.morphologyEx(
@@ -130,6 +134,7 @@ def build_candidate_masks(
         np.ones((3, 3), np.uint8),
         iterations=1,
     )
+    candidate_mask = cv2.dilate(candidate_mask, np.ones((3, 3), np.uint8), iterations=1)
     return white_mask, accent_mask, candidate_mask
 
 

@@ -5,6 +5,7 @@ from functools import lru_cache
 from app.pipelines.base import BasePipeline
 from app.pipelines.mock import MockPipeline
 from app.pipelines.price_tag_cpu_v1 import PriceTagCpuV1Pipeline
+from app.pipelines.price_tag_v2 import PriceTagV2Pipeline
 
 
 class PipelineRegistry:
@@ -39,4 +40,5 @@ def get_pipeline_registry() -> PipelineRegistry:
     registry = PipelineRegistry()
     registry.register(MockPipeline())
     registry.register(PriceTagCpuV1Pipeline())
+    registry.register(PriceTagV2Pipeline())
     return registry
