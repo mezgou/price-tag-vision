@@ -5,14 +5,12 @@ import {
   createJob,
   getCsvDownloadUrl,
   getJob,
-  getJobCrops,
   getJobPreview,
 } from './api/jobs'
-import { CropGallery } from './components/CropGallery'
 import { JobStatusCard } from './components/JobStatusCard'
 import { PreviewTable } from './components/PreviewTable'
 import { UploadDropzone } from './components/UploadDropzone'
-import type { Job, JobCrop, PreviewPayload } from './types/job'
+import type { Job, PreviewPayload } from './types/job'
 
 type ServiceStatus = {
   checked_at: string
@@ -44,7 +42,6 @@ const serviceMeta = [
 function App() {
   const [job, setJob] = useState<Job | null>(null)
   const [preview, setPreview] = useState<PreviewPayload | null>(null)
-  const [crops, setCrops] = useState<JobCrop[]>([])
   const [isUploading, setIsUploading] = useState(false)
   const [isArtifactsLoading, setIsArtifactsLoading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
@@ -197,10 +194,9 @@ function App() {
       setIsArtifactsLoading(true)
         setArtifactError(null)
 
-      const [previewResult, cropsResult] = await Promise.allSettled([
+      const previewResult = await Promise.allSettled([
         getJobPreview(jobId),
-        getJobCrops(jobId),
-      ])
+      ]).then(([result]) => result)
 
       if (isCancelled) {
         return
@@ -216,18 +212,6 @@ function App() {
           `Preview: ${getApiErrorMessage(
             previewResult.reason,
             'Failed to load preview.',
-          )}`,
-        )
-      }
-
-      if (cropsResult.status === 'fulfilled') {
-        setCrops(cropsResult.value)
-      } else {
-        setCrops([])
-        nextErrors.push(
-          `Crops: ${getApiErrorMessage(
-            cropsResult.reason,
-            'Failed to load crop images.',
           )}`,
         )
       }
@@ -251,7 +235,6 @@ function App() {
     setArtifactError(null)
     setIsArtifactsLoading(false)
     setPreview(null)
-    setCrops([])
     setJob(null)
 
     try {
@@ -350,27 +333,6 @@ function App() {
           ) : (
             <p className="empty-copy">
               Preview appears here after the job reaches <strong>succeeded</strong>.
-            </p>
-          )}
-        </section>
-
-        <section className="panel result-panel">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">Crops</p>
-              <h2>Detected crop images</h2>
-            </div>
-          </div>
-
-          {job?.status === 'succeeded' ? (
-            isArtifactsLoading && crops.length === 0 ? (
-              <p className="empty-copy">Loading crop images...</p>
-            ) : (
-              <CropGallery crops={crops} />
-            )
-          ) : (
-            <p className="empty-copy">
-              Crop images appear here after the worker writes output artifacts.
             </p>
           )}
         </section>

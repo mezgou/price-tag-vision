@@ -3,7 +3,10 @@
 **/.venv/
 .idea/
 .vscode/
-data/
+# ignore data/ contents but keep the catalog: the vision service loads it at
+# runtime (docker mounts ./data read-only), so it must ship for a fresh clone.
+data/*
+!data/db_hack.csv
 artifacts/
 docs/
 frontend/node_modules/

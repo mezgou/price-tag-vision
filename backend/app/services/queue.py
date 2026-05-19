@@ -20,9 +20,11 @@ def get_queue() -> Queue:
 
 
 def enqueue_job(job_id: str) -> str:
+    settings = get_settings()
     rq_job = get_queue().enqueue(
         "app.worker.tasks.process_job",
         job_id,
         job_id=f"process-{job_id}",
+        job_timeout=settings.job_timeout_seconds,
     )
     return rq_job.id

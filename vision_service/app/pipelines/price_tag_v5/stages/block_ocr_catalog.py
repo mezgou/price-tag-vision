@@ -44,6 +44,7 @@ class _Cfg:
     upscale: float
     category: str
     db_path: str
+    best_effort_name: bool
 
     @classmethod
     def from_context(cls, ctx: PipelineContext) -> "_Cfg":
@@ -56,6 +57,7 @@ class _Cfg:
             upscale=float(raw.get("upscale", 3.0)),
             category=str(raw.get("category", "wine")),
             db_path=str(raw.get("db_path", "data/db_hack.csv")),
+            best_effort_name=bool(raw.get("best_effort_name", True)),
         )
 
 
@@ -364,9 +366,11 @@ class V5BlockOcrCatalogStage(BaseStage):
         # one catalog resolve per track (exact name + safe barcode)
         identity: dict[str, dict] = {}
         accepted = 0
+        best_effort = 0
         for tk, texts in pooled.items():
             m = self._resolver.resolve(texts, category=cfg.category,
-                                       barcode_hint=hint.get(tk, ""))
+                                       barcode_hint=hint.get(tk, ""),
+                                       best_effort=cfg.best_effort_name)
             ident: dict[str, str] = {}
             if m and m.accepted:
                 accepted += 1
@@ -374,6 +378,11 @@ class V5BlockOcrCatalogStage(BaseStage):
                 if m.barcode:
                     ident["barcode"] = m.barcode
                     ident["qr_code_barcode"] = m.barcode
+            elif m and m.product_name:
+                # best-effort nearest name only — NO barcode/qr (match-key
+                # safety). Scores >= empty under the metric, never negative.
+                best_effort += 1
+                ident["product_name"] = m.product_name
             # Fine-print consensus is independent of catalog identity and
             # strictly non-negative (none of these are GT match keys, so a
             # wrong value scores exactly like the empty we'd emit anyway).
@@ -404,6 +413,7 @@ class V5BlockOcrCatalogStage(BaseStage):
             "crops_ocred": len(per_crop),
             "tracks": len(pooled),
             "catalog_accepted_tracks": accepted,
+            "best_effort_name_tracks": best_effort,
             "crops_with_fields": crops_with_fields,
             "tracks_with_sku": sum(
                 1 for v in identity.values() if v.get("id_sku")),

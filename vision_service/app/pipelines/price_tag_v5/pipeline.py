@@ -19,7 +19,11 @@ from app.pipelines.price_tag_v2.stages import (
     TopKCropSelectionStage,
     YoloByteTrackStage,
 )
-from app.pipelines.price_tag_v5.stages import V5BlockOcrCatalogStage
+from app.pipelines.price_tag_v5.stages import (
+    V5BlockOcrCatalogStage,
+    V5RowConfidenceGateStage,
+    V5SpatialSlotMergeStage,
+)
 
 
 class PriceTagV5Pipeline(PriceTagCpuV1Pipeline):
@@ -42,8 +46,10 @@ class PriceTagV5Pipeline(PriceTagCpuV1Pipeline):
             YoloByteTrackStage(),
             CropExtractionStage(),
             TopKCropSelectionStage(),
+            V5SpatialSlotMergeStage(),
             V5BlockOcrCatalogStage(),
             RowFusionStage(),
+            V5RowConfidenceGateStage(),
             CsvWriterStage(),
             PreviewWriterStage(),
             DebugManifestStage(),

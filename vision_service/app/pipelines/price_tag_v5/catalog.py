@@ -179,6 +179,7 @@ class CatalogResolver:
         *,
         category: str = "wine",
         barcode_hint: str = "",
+        best_effort: bool = False,
     ) -> CatalogMatch | None:
         qtoks = [t for t in brand_tokens(block_texts)
                  if t not in _STOP_TOKENS]
@@ -283,9 +284,19 @@ class CatalogResolver:
         # robust match key, the rest are no worse than withholding.
         barcode, cands = self._pick_barcode(best_name, barcode_hint)
         if not name_ok:
+            # Match-key safety is absolute: a non-confident match NEVER emits
+            # barcode/qr (those key the GT join — a wrong one mis-keys a row).
+            # Unchanged behaviour.
             barcode = ""
+        # Best-effort name: when the strict gate fails but a real (>=4-char)
+        # brand token still matched, surface the nearest catalog name so the
+        # field is a plausible guess instead of blank. product_name is a
+        # text-similarity field, NOT a match key, so a wrong guess scores
+        # exactly like the empty it replaces — never negative — while a near
+        # guess can clear the 0.85 similarity bar. accepted stays False.
+        emit_name = name_ok or (best_effort and best_idf > 0.0)
         return CatalogMatch(
-            product_name=best_name if name_ok else "",
+            product_name=best_name if emit_name else "",
             barcode=barcode,
             score=round(float(best_mass), 3),
             margin=round(float(best_mass - second_mass), 3),

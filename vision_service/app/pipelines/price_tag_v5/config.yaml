@@ -17,7 +17,10 @@ frame_sampling:
   sample_fps: 5.0
   max_frames: 600
   orientation_mode: none
-  debug_save_frames: true
+  # Crop/frame image previews are intentionally OFF for the service: the
+  # product surface is the CSV (+ its preview.json rows). Skipping image
+  # dumps also removes a large chunk of per-frame I/O from a full run.
+  debug_save_frames: false
   debug_jpeg_quality: 88
 
 yolo_detection:
@@ -45,11 +48,11 @@ crop_extraction:
   min_crop_width: 50
   min_crop_height: 50
   max_crops_per_frame: 32
-  max_total_crops: 600
-  debug_save_crops: true
+  max_total_crops: 900
+  debug_save_crops: false
   debug_crop_jpeg_quality: 92
   top_crops_preview_limit: 40
-  debug_save_contact_sheet: true
+  debug_save_contact_sheet: false
   contact_sheet_top_n: 80
   contact_sheet_thumb_width: 180
 
@@ -59,8 +62,23 @@ top_k_crop_selection:
   max_total_crops: 900
   min_quality_score: 0.05
 
+v5_spatial_slot_merge:
+  enabled: true
+  # Conservative tracklet de-fragmentation: only merge non-overlapping,
+  # temporally adjacent tracklets with nearly identical raw-frame geometry.
+  max_time_gap_ms: 1600
+  min_edge_score: 0.72
+  min_iou: 0.10
+  max_center_distance_ratio: 0.55
+  max_y_center_delta_ratio: 0.35
+  min_size_ratio: 0.45
+  allow_time_overlap: false
+  absorb_untracked_overlaps: true
+  overlap_absorb_min_iou: 0.55
+  overlap_absorb_max_detections: 2
+
 # v5 identity engine: one fast full-crop PaddleOCR-en pass per crop,
-# block-geometry price parse, per-track brand-token pool -> CatalogResolver
+# block-geometry price parse, per-slot brand-token pool -> CatalogResolver
 # (db_hack.csv) -> exact product_name + safe barcode. No GT used.
 v5_block_ocr:
   enabled: true
@@ -73,11 +91,31 @@ v5_block_ocr:
   # worth a precision regression on the primary wine scenario.
   category: wine
   db_path: data/db_hack.csv
+  # When the strict confidence gate fails but a real brand token still
+  # matched, emit the NEAREST catalog name (no barcode — match-key safety
+  # is absolute). product_name is a text-similarity field, not a join key,
+  # so a near guess can only match or score like the empty it replaces —
+  # never negative — and the CSV reads as resolved rather than blank.
+  best_effort_name: true
 
 row_fusion:
   enabled: true
   include_undecoded_detections: true
   default_absent_value: нет
+
+v5_row_confidence_gate:
+  enabled: true
+  # "recall" (default): emit every localized tag — contest score is
+  # physically capped on this footage regardless, so surfacing all detected
+  # tags (correct bbox + color + structural fields) is strictly more useful
+  # MVP output than withholding ~half of them. "strict": identity/price
+  # evidence only (old behavior). Spatial dedup collapses same-physical-tag
+  # fragments (high raw-bbox IoU + name-compatible) so recall mode stays
+  # clean. A per-row confidence/provenance side-car is written to
+  # outputs/<job>/debug/row_confidence.json for downstream triage.
+  mode: recall
+  keep_price_only_rows: true
+  spatial_dedup_iou: 0.60
 
 artifacts:
   csv: result.csv
@@ -90,8 +128,10 @@ stages:
   - YoloByteTrackStage
   - CropExtractionStage
   - TopKCropSelectionStage
+  - V5SpatialSlotMergeStage
   - V5BlockOcrCatalogStage
   - RowFusionStage
+  - V5RowConfidenceGateStage
   - CsvWriterStage
   - PreviewWriterStage
   - DebugManifestStage

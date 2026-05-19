@@ -39,7 +39,11 @@ def process_video_job(
     }
 
     try:
-        with httpx.Client(timeout=30.0) as client:
+        timeout = httpx.Timeout(
+            settings.vision_service_timeout_seconds,
+            connect=10.0,
+        )
+        with httpx.Client(timeout=timeout) as client:
             response = client.post(
                 f"{settings.vision_service_url}/api/pipeline/process",
                 json=payload,

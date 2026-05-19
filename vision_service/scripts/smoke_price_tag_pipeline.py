@@ -112,8 +112,13 @@ def main() -> int:
                 "HeuristicCandidateDetectionStage",
                 "FallbackHeuristicCandidateDetectionStage",
                 "YoloDetectionStage",
+                "YoloByteTrackStage",
                 "CropExtractionStage",
+                "TopKCropSelectionStage",
                 "BarcodeQrDecodeStage",
+                "V5SpatialSlotMergeStage",
+                "V5BlockOcrCatalogStage",
+                "V5RowConfidenceGateStage",
                 "RowFusionStage",
             }
         },
@@ -146,12 +151,12 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Optional explicit job id. Defaults to smoke-{video_stem}.",
     )
-    parser.add_argument("--sample-fps", type=float, default=1.0)
-    parser.add_argument("--max-frames", type=int, default=20)
+    parser.add_argument("--sample-fps", type=float, default=None)
+    parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument("--pipeline", type=str, default="price_tag_cpu_v1")
-    parser.add_argument("--max-candidates-per-frame", type=int, default=24)
-    parser.add_argument("--max-total-crops", type=int, default=120)
-    parser.add_argument("--max-crops-per-frame", type=int, default=16)
+    parser.add_argument("--max-candidates-per-frame", type=int, default=None)
+    parser.add_argument("--max-total-crops", type=int, default=None)
+    parser.add_argument("--max-crops-per-frame", type=int, default=None)
     parser.add_argument(
         "--config-json",
         type=str,
@@ -168,19 +173,23 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _build_request_config(args: argparse.Namespace) -> dict[str, Any]:
-    config = {
-        "frame_sampling": {
-            "sample_fps": args.sample_fps,
-            "max_frames": args.max_frames,
-        },
-        "candidate_detection": {
+    config: dict[str, Any] = {}
+    if args.sample_fps is not None or args.max_frames is not None:
+        config["frame_sampling"] = {}
+        if args.sample_fps is not None:
+            config["frame_sampling"]["sample_fps"] = args.sample_fps
+        if args.max_frames is not None:
+            config["frame_sampling"]["max_frames"] = args.max_frames
+    if args.max_candidates_per_frame is not None:
+        config["candidate_detection"] = {
             "max_candidates_per_frame": args.max_candidates_per_frame,
-        },
-        "crop_extraction": {
-            "max_total_crops": args.max_total_crops,
-            "max_crops_per_frame": args.max_crops_per_frame,
-        },
-    }
+        }
+    if args.max_total_crops is not None or args.max_crops_per_frame is not None:
+        config["crop_extraction"] = {}
+        if args.max_total_crops is not None:
+            config["crop_extraction"]["max_total_crops"] = args.max_total_crops
+        if args.max_crops_per_frame is not None:
+            config["crop_extraction"]["max_crops_per_frame"] = args.max_crops_per_frame
     if args.config_json.strip():
         override = json.loads(args.config_json)
         if not isinstance(override, dict):
