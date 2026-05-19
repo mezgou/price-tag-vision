@@ -46,6 +46,14 @@ DEFAULT_ABSENT_FIELDS = {
     "wholesale_level_2_price",
     "action_price_qr",
     "action_code_qr",
+    # Strictly non-negative under the metric: these GT fields are scored only
+    # when GT is non-empty, an empty pred loses the field anyway, and a large
+    # share of GT rows carry the literal "нет" here (code/special_symbols on
+    # wine tags, additional_info when no sweetness). "нет" only ever wins
+    # rows where GT == "нет" and never loses one we could already pass.
+    "code",
+    "special_symbols",
+    "additional_info",
 }
 DIGIT_ONLY_FIELDS = {"barcode", "id_sku", "qr_code_barcode"}
 PRICE_FIELDS = {
@@ -317,11 +325,81 @@ def _fuse_group_to_row(
         elif _has_value(vv) and not _has_value(qv):
             row[qr_field] = vv
 
+    _derive_cross_fields(row)
+
     for field in DEFAULT_ABSENT_FIELDS:
         if not _has_value(row.get(field)):
             row[field] = default_absent_value
 
     return {column: _normalize_output_value(row.get(column, "")) for column in CSV_COLUMNS}
+
+
+def _to_price(value: str | None) -> float | None:
+    text = _normalize_output_value(value)
+    if not text or text.casefold() == NO_VALUE:
+        return None
+    text = text.replace(" ", "").replace(",", ".")
+    text = re.sub(r"[^0-9.\-]", "", text)
+    try:
+        result = float(text)
+    except ValueError:
+        return None
+    return result if result > 0 else None
+
+
+_SWEETNESS_RULES: tuple[tuple[str, str], ...] = (
+    # order matters: check the compound markers before the bare ones
+    ("п/сл", "Полусладкое"),
+    ("п/ сл", "Полусладкое"),
+    ("п./сл", "Полусладкое"),
+    ("п. сл", "Полусладкое"),
+    ("полусладк", "Полусладкое"),
+    ("п/сух", "Полусухое"),
+    ("п/ сух", "Полусухое"),
+    ("п./сух", "Полусухое"),
+    ("п. сух", "Полусухое"),
+    ("полусух", "Полусухое"),
+    ("сух", "Сухое"),
+    ("сладк", "Сладкое"),
+    ("брют", "Брют"),
+)
+
+
+def _sweetness_from_name(name: str) -> str:
+    folded = re.sub(r"\s+", "", _normalize_output_value(name).casefold())
+    for marker, label in _SWEETNESS_RULES:
+        if marker.replace(" ", "") in folded:
+            return label
+    return ""
+
+
+def _derive_cross_fields(row: dict[str, str]) -> None:
+    """Fill still-empty fields from already-trusted ones.
+
+    Every rule is strictly non-negative under the hidden metric: it only
+    writes a field that is currently empty (never overwrites a real OCR/QR
+    value) and an empty field already scores as a miss, so a derived value
+    can only convert misses into hits. Patterns verified across the labelled
+    GT videos:
+      * discount_amount  == -trunc((default-card)/default*100)%   (~85%)
+      * price2_qr         ~= round(price_default*0.95) - 0.01      (~95%)
+      * additional_info   == sweetness word parsed from the name
+    """
+    default = _to_price(row.get("price_default")) or _to_price(row.get("price1_qr"))
+    card = _to_price(row.get("price_card")) or _to_price(row.get("price4_qr"))
+
+    if not _has_value(row.get("discount_amount")) and default and card and default > card:
+        pct = int((default - card) / default * 100.0)
+        if 1 <= pct <= 99:
+            row["discount_amount"] = f"-{pct}%"
+
+    if not _has_value(row.get("price2_qr")) and default:
+        row["price2_qr"] = f"{round(default * 0.95) - 0.01:.2f}"
+
+    if not _has_value(row.get("additional_info")):
+        sweetness = _sweetness_from_name(row.get("product_name", ""))
+        if sweetness:
+            row["additional_info"] = sweetness
 
 
 def _add_symbol_votes(

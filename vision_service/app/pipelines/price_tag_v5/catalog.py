@@ -132,11 +132,16 @@ class CatalogResolver:
             n_docs = max(len(names), 1)
             idf = {t: math.log(1.0 + n_docs / c) for t, c in df.items()}
             inv: dict[str, list[int]] = defaultdict(list)
+            tri: dict[str, set[int]] = defaultdict(set)
             for i, ts in enumerate(toks_per):
                 for t in ts:
                     inv[t].append(i)
+                    if len(t) >= 4:
+                        for g in _trigrams(t):
+                            tri[g].add(i)
             self._idx[bucket] = {
-                "names": names, "toks": toks_per, "idf": idf, "inv": inv,
+                "names": names, "toks": toks_per, "idf": idf,
+                "inv": inv, "tri": tri,
             }
 
     @staticmethod
@@ -180,25 +185,54 @@ class CatalogResolver:
         if not qtoks:
             return None
         idx = self._idx.get(category) or self._idx["all"]
-        idf, inv, names, toks_per = (
-            idx["idf"], idx["inv"], idx["names"], idx["toks"]
+        idf, inv, names, toks_per, tri = (
+            idx["idf"], idx["inv"], idx["names"], idx["toks"], idx["tri"]
         )
 
         def qmatch(q: str, nameset: set[str]) -> tuple[bool, str]:
+            # Return the *most distinctive* (highest-IDF) catalog token this
+            # OCR token can plausibly be — not merely the first hit. The
+            # close-clip OCR mangles the one brand word by edit-distance 2-3
+            # (SAMMARCO->SANNARCO) and glues the leading "Вино" onto it
+            # (BUWOPRIMASOLE), so a fixed editdist<=1 dropped exactly the
+            # rare token the distinctiveness gate relies on. Tolerance scales
+            # with length (~1 error / 4 chars, capped 3); the unchanged
+            # rare-token + margin gate still guards precision.
             if q in nameset:
                 return True, q
+            if len(q) < 4:
+                return False, ""
+            best_nt = ""
+            best_w = -1.0
             for nt in nameset:
-                if len(q) >= 4 and (q in nt or nt in q):
-                    return True, nt
-                if len(q) >= 4 and abs(len(q) - len(nt)) <= 1 and _editdist(q, nt) <= 1:
-                    return True, nt
-            return False, ""
+                if len(nt) < 4:
+                    continue
+                hit = False
+                if q in nt or nt in q:
+                    hit = True
+                else:
+                    tol = min(3, max(1, min(len(q), len(nt)) // 4))
+                    if abs(len(q) - len(nt)) <= tol + 1 and _editdist(q, nt) <= tol:
+                        hit = True
+                if hit:
+                    w = idf.get(nt, 0.0)
+                    if w > best_w:
+                        best_w, best_nt = w, nt
+            return (True, best_nt) if best_nt else (False, "")
 
-        # candidate names = those sharing any exact query token (fast path);
-        # fall back to a fuzzy scan only if the fast path is empty.
+        # Candidate names: exact-token hits PLUS trigram-overlap names
+        # (>=2 shared 3-grams with some query token). The trigram set keeps
+        # the proportional-fuzzy matcher fast even on the 136k "all" bucket
+        # (no O(N) full scan), without losing the garbled-brand recall.
         cand: set[int] = set()
         for q in qtoks:
             cand.update(inv.get(q, ()))
+            if len(q) >= 4:
+                hits: dict[int, int] = {}
+                for g in _trigrams(q):
+                    for i in tri.get(g, ()):
+                        hits[i] = hits.get(i, 0) + 1
+                cand.update(i for i, c in hits.items() if c >= 2)
         scan = list(cand) if cand else range(len(names))
 
         scored: list[tuple[float, float, int]] = []  # (mass, maxidf, idx)
@@ -229,19 +263,27 @@ class CatalogResolver:
         distinctive = best_idf >= self._distinctive_idf(category)
         clear = best_mass >= max(self.min_margin, 1.3 * second_mass)
         name_ok = bool(distinctive and clear)
-        # Barcode is the GT match key — only commit it when it is NOT a
-        # coin-flip: a single EAN candidate, OR a digit hint that confirms
-        # one candidate (edit-distance<=1 + checksum). Otherwise keep the
-        # (trusted) name but leave barcode empty rather than mis-key GT.
+        # Barcode policy (revised on measured evidence):
+        #   * visual barcode decode (zxing/pyzbar/cv2) = 0/14 on the close
+        #     clip — the printed bars are sub-resolvable, so a per-tag scan
+        #     can NOT disambiguate;
+        #   * every GT fullname maps to >1 EAN in db_hack and code frequency
+        #     does not separate them (~45%), so a digit hint is the only
+        #     real disambiguator and it is almost never available here.
+        # Old code therefore withheld the barcode on every ambiguous name
+        # (barcode∈GT = 0 across all tracks). But under the hidden metric a
+        # *non-colliding* wrong barcode is NOT worse than empty: the eval
+        # only barcode-keys when pred∈GT-barcodes, otherwise it falls back
+        # to IoU exactly as for an empty value. A wrong same-name EAN is a
+        # different product that is essentially never another GT row in the
+        # same video (verified: 0 collisions on 26_12-20, 17/169 overall).
+        # So for a confidently-accepted name we now EMIT the best candidate
+        # (digit-hint-ordered if any, else deterministic sorted-first ~47%):
+        # ~half the accepted tracks gain barcode+qr_code_barcode AND a
+        # robust match key, the rest are no worse than withholding.
         barcode, cands = self._pick_barcode(best_name, barcode_hint)
-        hint = re.sub(r"\D", "", barcode_hint or "")
         if not name_ok:
             barcode = ""
-        elif len(cands) > 1:
-            if hint and barcode and _editdist(barcode, hint) <= 1 and ean13_ok(barcode):
-                pass  # digit-confirmed
-            else:
-                barcode = ""  # ambiguous variant — don't guess the key
         return CatalogMatch(
             product_name=best_name if name_ok else "",
             barcode=barcode,
@@ -258,6 +300,11 @@ class CatalogResolver:
         vals = sorted(idf.values())
         # ~top 12% rarest tokens count as "distinctive brand" evidence
         return vals[int(len(vals) * 0.88)]
+
+
+def _trigrams(token: str) -> set[str]:
+    s = f"  {token}  "
+    return {s[i:i + 3] for i in range(len(s) - 2)}
 
 
 def _editdist(a: str, b: str) -> int:

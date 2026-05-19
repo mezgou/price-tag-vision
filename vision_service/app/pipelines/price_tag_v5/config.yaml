@@ -66,6 +66,11 @@ v5_block_ocr:
   enabled: true
   max_crops: 900
   upscale: 3.0
+  # "wine" bucket measured: accepted 4/12, name precision 100%, bc∈GT 3/4,
+  # 129 ms/track. "all" was tried and REJECTED — it dropped name precision
+  # to 80% (a wrong identity is worse than empty) and was 27x slower. Non-
+  # wine videos (43_15 honey, 49_5) are a known, documented recall gap, not
+  # worth a precision regression on the primary wine scenario.
   category: wine
   db_path: data/db_hack.csv
 
