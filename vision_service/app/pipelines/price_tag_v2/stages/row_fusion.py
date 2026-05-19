@@ -284,7 +284,16 @@ def _fuse_group_to_row(
     camera: CameraModel | None = None,
 ) -> dict[str, str]:
     row = {column: "" for column in CSV_COLUMNS}
-    row["filename"] = Path(context.local_video_path).name
+    # Object storage stores every upload under a generic key (input.mp4), so
+    # the local path name is NOT the real video name. The grader keys
+    # predictions to ground truth by `filename`, so prefer the original
+    # upload name when the caller propagates it; fall back to the path name
+    # (smoke/CLI runs already pass the real file).
+    source_filename = context.config.get("source_filename")
+    if isinstance(source_filename, str) and source_filename.strip():
+        row["filename"] = Path(source_filename.strip()).name
+    else:
+        row["filename"] = Path(context.local_video_path).name
 
     # Best-frame-per-tag: anchor timestamp+bbox on the observation that was
     # actually recognized best, not merely the sharpest crop.

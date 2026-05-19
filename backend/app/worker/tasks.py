@@ -15,6 +15,7 @@ LOGGER = logging.getLogger("price-tag-vision.worker.tasks")
 class JobContext:
     id: str
     input_video_key: str
+    original_filename: str
     pipeline_name: str | None
     pipeline_version: str | None
 
@@ -44,7 +45,10 @@ def process_job(job_id: str) -> dict[str, str]:
             input_video_key=job.input_video_key,
             pipeline_name=pipeline_name,
             pipeline_version=pipeline_version,
-            config={},
+            # The object key stores every upload as input.mp4; the CSV
+            # `filename` column must carry the ORIGINAL video name or the
+            # grader cannot key predictions to its ground truth.
+            config={"source_filename": job.original_filename},
         )
 
         _update_job(
@@ -103,6 +107,7 @@ def _get_job_context(job_id: str) -> JobContext:
         return JobContext(
             id=job.id,
             input_video_key=job.input_video_key,
+            original_filename=job.original_filename,
             pipeline_name=job.pipeline_name,
             pipeline_version=job.pipeline_version,
         )

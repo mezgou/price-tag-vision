@@ -81,9 +81,21 @@ class V5RowConfidenceGateStage(BaseStage):
             # genuinely empty (no usable bbox).
             gated = [row for row in input_rows if _row_bbox(row) is not None]
 
-        kept, dedup_groups = _spatial_dedup(gated, config.spatial_dedup_iou)
+        deduped, dedup_groups = _spatial_dedup(gated, config.spatial_dedup_iou)
 
-        provenance = [_row_confidence(row) for row in kept]
+        # Emit best-first. The official eval is order-independent for the
+        # primary (barcode) key and, for the IoU fallback, the FIRST listed
+        # prediction claims an overlapping GT row — so surfacing the highest-
+        # confidence row first is metric-neutral-to-positive AND makes the
+        # CSV read as a clean, identified table instead of opening on a wall
+        # of weak localization-only rows.
+        ranked = sorted(
+            ((_row_confidence(row), row) for row in deduped),
+            key=lambda pair: pair[0]["confidence"],
+            reverse=True,
+        )
+        provenance = [prov for prov, _ in ranked]
+        kept = [row for _, row in ranked]
         context.csv_rows = kept
 
         side_car = {
