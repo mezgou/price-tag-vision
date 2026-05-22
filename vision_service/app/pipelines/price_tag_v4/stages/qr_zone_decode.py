@@ -8,12 +8,19 @@ import cv2
 from app.pipelines.base import BaseStage, PipelineContext, StageOutcome
 from app.pipelines.price_tag_cpu_v1.stages.barcode_qr_decode import (
     BarcodeQrDecodeConfig,
+    DecoderHit,
+    OPTIONAL_PYZBAR_DECODER,
+    OPTIONAL_ZXINGCPP_DECODER,
     _build_frame_lookup,
     _load_crop_image,
     _resolve_decoder_runners,
 )
 from app.schemas.detections import DecodedSymbol
-from app.utils.decoding import build_decode_variants, normalize_decoded_payload
+from app.utils.decoding import (
+    DecodeVariantImage,
+    build_decode_variants,
+    normalize_decoded_payload,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +50,9 @@ class QrZoneDecodeStage(BaseStage):
 
         barcode_config = BarcodeQrDecodeConfig.from_context(context)
         warnings = list(barcode_config.warnings)
-        decoder_runners = _resolve_decoder_runners(config=barcode_config, warnings=warnings)
+        decoder_runners = _qr_zone_decoder_runners(
+            _resolve_decoder_runners(config=barcode_config, warnings=warnings)
+        )
         if not decoder_runners or not context.crop_candidates:
             return StageOutcome(
                 output_summary={
@@ -84,19 +93,7 @@ class QrZoneDecodeStage(BaseStage):
             crop_had_hit = False
             for zone_name, zone in qr_zones(image):
                 zone_attempts += 1
-                variants = build_decode_variants(
-                    zone,
-                    include_original=True,
-                    include_grayscale=True,
-                    include_clahe=True,
-                    include_sharpened=True,
-                    include_resized_x2=True,
-                    include_resized_x3=True,
-                    include_resized_x4=False,
-                    include_adaptive_threshold=True,
-                    include_right_angle_rotations=False,
-                    include_small_angle_rotations=False,
-                )
+                variants = _qr_zone_variants(zone)
                 for decoder_name, runner in decoder_runners:
                     for variant_name, variant in variants.items():
                         decode_attempts += 1
@@ -180,8 +177,10 @@ def config_from_context(context: PipelineContext) -> QrZoneDecodeConfig:
 def qr_zones(image: Any) -> list[tuple[str, Any]]:
     h, w = image.shape[:2]
     boxes = {
+        "qr_square": (0.62, 0.02, 0.98, 0.45),
         "upper_right": (0.48, 0.00, 1.00, 0.52),
-        "right_half": (0.42, 0.00, 1.00, 0.72),
+        "right_mid": (0.52, 0.05, 1.00, 0.70),
+        "qr_tight": (0.58, 0.00, 1.00, 0.50),
         "upper_left": (0.00, 0.00, 0.48, 0.52),
         "upper_band": (0.00, 0.00, 1.00, 0.48),
     }
@@ -194,8 +193,124 @@ def qr_zones(image: Any) -> list[tuple[str, Any]]:
         if x2 - x1 < 32 or y2 - y1 < 32:
             continue
         zone = image[y1:y2, x1:x2]
-        zones.append((name, cv2.copyMakeBorder(zone, 12, 12, 12, 12, cv2.BORDER_REPLICATE)))
+        zones.append(
+            (
+                name,
+                cv2.copyMakeBorder(
+                    zone,
+                    20,
+                    20,
+                    20,
+                    20,
+                    cv2.BORDER_CONSTANT,
+                    value=_white_border_value(zone),
+                ),
+            )
+        )
     return zones
+
+
+def _qr_zone_variants(zone: Any) -> dict[str, DecodeVariantImage]:
+    variants = build_decode_variants(
+        zone,
+        include_original=True,
+        include_grayscale=True,
+        include_clahe=False,
+        include_sharpened=False,
+        include_resized_x2=True,
+        include_resized_x3=False,
+        include_resized_x4=False,
+        include_adaptive_threshold=True,
+        include_right_angle_rotations=False,
+        include_small_angle_rotations=False,
+    )
+    variants.update(_targeted_qr_zone_variants(zone))
+    return variants
+
+
+def _targeted_qr_zone_variants(zone: Any) -> dict[str, DecodeVariantImage]:
+    """High-res QR variants proven on tilted shelf crops."""
+    if zone.size == 0:
+        return {}
+    gray = cv2.cvtColor(zone, cv2.COLOR_BGR2GRAY) if zone.ndim == 3 else zone
+    gray_x4 = cv2.resize(
+        gray,
+        (max(gray.shape[1] * 4, 1), max(gray.shape[0] * 4, 1)),
+        interpolation=cv2.INTER_CUBIC,
+    )
+    blurred = cv2.GaussianBlur(gray_x4, (0, 0), sigmaX=1.0)
+    sharp = cv2.addWeighted(gray_x4, 1.7, blurred, -0.7, 0)
+    _, otsu = cv2.threshold(gray_x4, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    return {
+        "x4_gray": DecodeVariantImage(
+            name="x4_gray",
+            image=gray_x4,
+            scale_x=4.0,
+            scale_y=4.0,
+        ),
+        "x4_sharp": DecodeVariantImage(
+            name="x4_sharp",
+            image=sharp,
+            scale_x=4.0,
+            scale_y=4.0,
+        ),
+        "x4_otsu": DecodeVariantImage(
+            name="x4_otsu",
+            image=otsu,
+            scale_x=4.0,
+            scale_y=4.0,
+        ),
+    }
+
+
+def _white_border_value(zone: Any) -> int | tuple[int, int, int]:
+    if getattr(zone, "ndim", 0) == 2:
+        return 255
+    return (255, 255, 255)
+
+
+def _qr_zone_decoder_runners(decoder_runners: list[tuple[str, Any]]) -> list[tuple[str, Any]]:
+    return [
+        (name, _decode_qr_only_zxingcpp if name == OPTIONAL_ZXINGCPP_DECODER else runner)
+        for name, runner in decoder_runners
+        if name != OPTIONAL_PYZBAR_DECODER
+    ]
+
+
+def _decode_qr_only_zxingcpp(variant: DecodeVariantImage) -> list[DecoderHit]:
+    import zxingcpp  # type: ignore[import-not-found]
+
+    hits: list[DecoderHit] = []
+    results = zxingcpp.read_barcodes(
+        variant.image,
+        formats=zxingcpp.BarcodeFormat.QRCode,
+        try_rotate=True,
+        try_downscale=True,
+        try_invert=True,
+    )
+    if not results and variant.name in {"x4_gray", "x4_sharp", "x4_otsu"}:
+        results = zxingcpp.read_barcodes(
+            variant.image,
+            formats=zxingcpp.BarcodeFormat.QRCode,
+            try_rotate=True,
+            try_downscale=False,
+            try_invert=True,
+            is_pure=True,
+        )
+    for result in results:
+        payload = normalize_decoded_payload(getattr(result, "text", ""))
+        if not payload:
+            continue
+        hits.append(
+            DecoderHit(
+                payload=payload,
+                symbol_type="qr",
+                confidence=0.92,
+                bbox=None,
+                attributes={"format": "qr_code", "qr_zone_only": True},
+            )
+        )
+    return hits
 
 
 def bool_value(value: Any, *, default: bool) -> bool:

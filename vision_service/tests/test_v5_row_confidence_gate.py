@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.pipelines.price_tag_v5.stages.row_confidence_gate import (
+    RowConfidenceGateConfig,
     V5RowConfidenceGateStage,
     _row_confidence,
     _spatial_dedup,
@@ -28,7 +29,9 @@ def _bbox_row(
 def test_row_gate_keeps_catalog_identity_match_key_and_price_rows() -> None:
     assert row_has_v5_evidence({"product_name": "Wine"})
     assert row_has_v5_evidence({"barcode": "8051070512049"})
+    assert not row_has_v5_evidence({"barcode": "8051070512040"})
     assert row_has_v5_evidence({"price_card": "1199.99"})
+    assert not row_has_v5_evidence({"catalog_guess_name": "Likely Wine"})
 
 
 def test_row_gate_suppresses_absent_only_rows() -> None:
@@ -81,6 +84,128 @@ def test_recall_mode_keeps_every_localized_tag(pipeline_context) -> None:
 
     assert outcome.output_summary["kept_rows"] == 2
     assert outcome.output_summary["mode"] == "recall"
+
+
+def test_balanced_mode_is_default_and_invalid_mode_fallback(pipeline_context) -> None:
+    assert RowConfidenceGateConfig.from_context(pipeline_context).mode == "balanced"
+
+    pipeline_context.config["v5_row_confidence_gate"] = {"mode": "diagnostic"}
+
+    assert RowConfidenceGateConfig.from_context(pipeline_context).mode == "balanced"
+
+
+def test_balanced_mode_suppresses_low_evidence_localized_rows(pipeline_context) -> None:
+    pipeline_context.config["v5_row_confidence_gate"] = {
+        "enabled": True,
+        "mode": "balanced",
+        "min_confidence": 0.30,
+        "spatial_dedup_iou": 0.0,
+    }
+    pipeline_context.csv_rows = [
+        _bbox_row(10, 10, 100, 100),  # localized only -> diagnostic, not CSV
+        _bbox_row(110, 10, 200, 100, color="red"),  # color+localized only
+        _bbox_row(210, 10, 300, 100, color="red", price_card="1499.99"),
+        _bbox_row(
+            310,
+            10,
+            400,
+            100,
+            color="red",
+            price_card="1499.99",
+            price_default="1899.99",
+        ),
+        _bbox_row(410, 10, 500, 100, barcode="8051070512049"),
+        {"barcode": "8051070512049"},  # no bbox -> not a row in final CSV
+    ]
+
+    outcome = V5RowConfidenceGateStage().run(pipeline_context)
+
+    assert len(pipeline_context.csv_rows) == 2
+    assert any(row.get("barcode", "") == "8051070512049" for row in pipeline_context.csv_rows)
+    assert any(row.get("price_default", "") == "1899.99" for row in pipeline_context.csv_rows)
+    assert outcome.output_summary["mode"] == "balanced"
+    assert outcome.output_summary["input_rows"] == 6
+    assert outcome.output_summary["kept_rows"] == 2
+    assert outcome.output_summary["suppressed_rows"] == 4
+
+
+def test_balanced_mode_keeps_confident_evidence_rows(pipeline_context) -> None:
+    pipeline_context.config["v5_row_confidence_gate"] = {
+        "enabled": True,
+        "mode": "balanced",
+        "min_confidence": 0.30,
+        "spatial_dedup_iou": 0.0,
+    }
+    pipeline_context.csv_rows = [
+        _bbox_row(10, 10, 100, 100, product_name="Wine", barcode="8051070512049"),
+        _bbox_row(110, 10, 200, 100, barcode="3500610117022"),
+        _bbox_row(210, 10, 300, 100, qr_code_barcode="4690491122587"),
+        _bbox_row(310, 10, 400, 100, product_name="Wine", color="red"),
+        _bbox_row(410, 10, 500, 100, price_card="1499.99", price_default="1899.99"),
+    ]
+
+    outcome = V5RowConfidenceGateStage().run(pipeline_context)
+
+    assert outcome.output_summary["kept_rows"] == 5
+    assert outcome.output_summary["suppressed_rows"] == 0
+
+
+def test_balanced_mode_thresholds_single_weak_signals(pipeline_context) -> None:
+    pipeline_context.config["v5_row_confidence_gate"] = {
+        "enabled": True,
+        "mode": "balanced",
+        "min_confidence": 0.30,
+        "spatial_dedup_iou": 0.0,
+    }
+    pipeline_context.csv_rows = [
+        _bbox_row(10, 10, 100, 100, product_name="Likely catalog guess"),
+        _bbox_row(
+            110,
+            10,
+            200,
+            100,
+            catalog_match_status="catalog_guess",
+            catalog_guess_name="Likely Wine",
+        ),
+        _bbox_row(210, 10, 300, 100, price_card="1499.99"),
+    ]
+
+    outcome = V5RowConfidenceGateStage().run(pipeline_context)
+
+    assert pipeline_context.csv_rows == []
+    assert outcome.output_summary["kept_rows"] == 0
+    assert outcome.output_summary["suppressed_rows"] == 3
+
+
+def test_balanced_mode_keeps_high_confidence_sku(pipeline_context) -> None:
+    pipeline_context.config["v5_row_confidence_gate"] = {
+        "enabled": True,
+        "mode": "balanced",
+        "min_confidence": 0.30,
+        "spatial_dedup_iou": 0.0,
+    }
+    pipeline_context.csv_rows = [
+        _bbox_row(
+            10,
+            10,
+            100,
+            100,
+            id_sku="270102701074",
+            id_sku_confidence="0.94",
+        ),
+        _bbox_row(
+            110,
+            10,
+            200,
+            100,
+            code="01_026015 - 026016",
+        ),
+    ]
+
+    outcome = V5RowConfidenceGateStage().run(pipeline_context)
+
+    assert outcome.output_summary["kept_rows"] == 1
+    assert pipeline_context.csv_rows[0]["id_sku"] == "270102701074"
 
 
 def test_spatial_dedup_collapses_same_tag_keeps_higher_confidence() -> None:
@@ -146,9 +271,19 @@ def test_confidence_is_monotonic_and_bounded() -> None:
 def test_gate_writes_confidence_side_car(pipeline_context) -> None:
     pipeline_context.config["v5_row_confidence_gate"] = {
         "enabled": True,
-        "mode": "recall",
+        "mode": "balanced",
+        "min_confidence": 0.30,
     }
     pipeline_context.csv_rows = [
+        _bbox_row(1, 1, 5, 5),
+        _bbox_row(
+            6,
+            6,
+            9,
+            9,
+            catalog_match_status="catalog_guess",
+            catalog_guess_name="Likely Wine",
+        ),
         _bbox_row(
             10,
             10,
@@ -166,3 +301,7 @@ def test_gate_writes_confidence_side_car(pipeline_context) -> None:
     stored = pipeline_context.artifact_writer.storage.objects
     assert key in stored
     assert outcome.output_summary["identity_rows"] == 1
+    payload = stored[key][0].decode("utf-8")
+    assert '"candidates"' in payload
+    assert '"suppressed_reason": "no_evidence"' in payload
+    assert '"catalog_guess_name": "Likely Wine"' in payload

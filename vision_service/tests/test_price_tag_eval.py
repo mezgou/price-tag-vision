@@ -37,3 +37,28 @@ def test_evaluate_rows_matches_by_iou_and_field_accuracy() -> None:
     assert report["correct_rows"] == 1
     assert report["score"] == 1.0
 
+
+def test_evaluate_rows_ignores_catalog_guess_metadata() -> None:
+    gt_row = {
+        "filename": "video.mp4",
+        "x_min": "10",
+        "y_min": "10",
+        "x_max": "110",
+        "y_max": "80",
+        "price_card": "1299.99",
+    }
+    pred_row = {
+        "filename": "video.mp4",
+        "x_min": "10",
+        "y_min": "10",
+        "x_max": "110",
+        "y_max": "80",
+        "price_card": "1299.99",
+        "catalog_match_status": "catalog_guess",
+        "catalog_guess_name": "Likely Wine",
+    }
+
+    report = evaluate_rows(pred_rows=[pred_row], gt_rows=[gt_row])
+
+    assert report["matched_rows"] == 1
+    assert report["score"] == 1.0

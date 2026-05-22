@@ -103,3 +103,16 @@ def test_not_accepted_has_no_name_or_barcode(
     if m is not None and not m.accepted:
         assert m.product_name == ""
         assert m.barcode == ""
+
+
+def test_best_effort_name_is_catalog_guess_not_product_name(
+    resolver: CatalogResolver,
+) -> None:
+    m = resolver.resolve(["NEGROAMARD"], category="all", best_effort=True)
+
+    assert m is not None
+    assert not m.accepted
+    assert m.product_name == ""
+    assert m.barcode == ""
+    assert m.catalog_guess_name
+    assert m.status == "catalog_guess"

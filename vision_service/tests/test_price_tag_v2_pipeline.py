@@ -40,6 +40,17 @@ def test_parse_qr_payload_maps_compact_fields() -> None:
     }
 
 
+def test_parse_qr_payload_maps_verbose_price_fields() -> None:
+    parsed = parse_qr_payload(
+        "barcode=3259354509500&price1=599.99&price2=549.99&price4=499.99"
+    )
+
+    assert parsed["qr_code_barcode"] == "3259354509500"
+    assert parsed["price1_qr"] == "599.99"
+    assert parsed["price2_qr"] == "549.99"
+    assert parsed["price4_qr"] == "499.99"
+
+
 @pytest.mark.parametrize(
     ("image", "expected"),
     [

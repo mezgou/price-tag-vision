@@ -22,6 +22,13 @@ from app.pipelines.price_tag_v2.stages.zonal_ocr import (
     _load_crop_image,
     classify_tag_color,
 )
+from app.pipelines.price_tag_v2.stages.row_fusion import parse_qr_payload
+from app.pipelines.price_tag_v5.catalog import (
+    CatalogMatch,
+    CatalogResolver,
+    ean13_ok,
+    to_ean13,
+)
 
 # classify_tag_color returns Russian words; every GT row uses the English
 # token ("red" 262, "yellow" 12). Without this map `color` — a field scored
@@ -32,9 +39,199 @@ _COLOR_TO_EN = {
     "желтый": "yellow",
     "белый": "white",
 }
-from app.pipelines.price_tag_v5.catalog import CatalogResolver
-
 import cv2  # noqa: E402
+
+
+def _catalog_identity_fields(
+    match: CatalogMatch | None,
+    *,
+    barcode_hint: str = "",
+    reliable_barcode_hint: str | None = None,
+) -> dict[str, str]:
+    if match is None:
+        return {}
+    if not match.accepted and not match.catalog_guess_name:
+        return {}
+
+    fields = {
+        "catalog_match_status": match.status,
+        "catalog_resolver_status": match.status,
+        "catalog_match_source": "v5_catalog_resolver",
+        "catalog_match_score": f"{match.score:.3f}",
+        "catalog_match_margin": f"{match.margin:.3f}",
+    }
+    if match.candidate_codes:
+        fields["catalog_candidate_codes"] = ",".join(match.candidate_codes)
+
+    trusted_hint = barcode_hint if reliable_barcode_hint is None else reliable_barcode_hint
+    if match.accepted:
+        if _has_reliable_catalog_key(match, trusted_hint):
+            fields["catalog_key_source"] = "visual_barcode_or_qr"
+            fields["product_name"] = match.product_name
+            fields["barcode"] = match.barcode
+            fields["qr_code_barcode"] = match.barcode
+            return fields
+        fields["catalog_match_status"] = "catalog_guess"
+        fields["catalog_key_source"] = "catalog_inferred"
+        fields["catalog_withheld_reason"] = "no_reliable_barcode"
+        fields["catalog_guess_name"] = match.product_name
+        if match.barcode:
+            fields["catalog_guess_barcode"] = match.barcode
+        return fields
+
+    fields["catalog_guess_name"] = match.catalog_guess_name
+    if match.candidate_codes:
+        fields["catalog_guess_barcode"] = match.candidate_codes[0]
+    return fields
+
+
+def _has_reliable_catalog_key(match: CatalogMatch, barcode_hint: str) -> bool:
+    hint = to_ean13(barcode_hint)
+    if not hint or not ean13_ok(hint):
+        return False
+    candidates = set(match.candidate_codes)
+    if match.barcode:
+        candidates.add(match.barcode)
+    return hint in candidates
+
+
+def _barcode_hints_by_track(
+    context: PipelineContext,
+    det2track: dict[str, str],
+) -> dict[str, list[str]]:
+    hints: dict[str, list[str]] = {}
+    for symbol in context.decoded_symbols:
+        track_id = det2track.get(symbol.detection_id, symbol.detection_id)
+        for value in _barcode_values_from_symbol(symbol.payload):
+            hints.setdefault(track_id, []).append(value)
+    return hints
+
+
+def _barcode_values_from_symbol(payload: str) -> list[str]:
+    parsed = parse_qr_payload(payload)
+    values = [parsed.get("barcode", ""), parsed.get("qr_code_barcode", ""), payload]
+    out: list[str] = []
+    for value in values:
+        code = to_ean13(value)
+        if code and ean13_ok(code):
+            out.append(code)
+    return list(dict.fromkeys(out))
+
+
+def _best_barcode_hint(values: list[str], fallback: str = "") -> str:
+    for value in values:
+        code = to_ean13(value)
+        if code and ean13_ok(code):
+            return code
+    code = to_ean13(fallback)
+    return code if code and ean13_ok(code) else fallback
+
+
+_DIGITISH_TRANSLATION = str.maketrans(
+    {
+        "O": "0",
+        "o": "0",
+        "О": "0",
+        "о": "0",
+        "Q": "0",
+        "I": "1",
+        "i": "1",
+        "l": "1",
+        "L": "1",
+        "І": "1",
+        "|": "1",
+        "S": "5",
+        "s": "5",
+        "B": "8",
+        "З": "3",
+        "з": "3",
+    }
+)
+
+
+def _digit_runs(text: str) -> list[str]:
+    translated = str(text or "").translate(_DIGITISH_TRANSLATION)
+    pattern = r"(?<!\w)[0-9][0-9\s-]{9,18}[0-9](?!\w)"
+    candidates = {
+        re.sub(r"\D", "", match.group(0))
+        for match in re.finditer(pattern, translated)
+    }
+    compact = re.sub(r"\D", "", translated)
+    if len(compact) in {11, 12, 13, 14}:
+        candidates.add(compact)
+    return [value for value in candidates if value]
+
+
+def _catalog_match_record(
+    track_id: str,
+    match: CatalogMatch | None,
+    *,
+    barcode_hint: str = "",
+    reliable_barcode_hint: str | None = None,
+) -> dict[str, Any]:
+    if match is None:
+        return {}
+    trusted_hint = barcode_hint if reliable_barcode_hint is None else reliable_barcode_hint
+    reliable_key = _has_reliable_catalog_key(match, trusted_hint)
+    status = (
+        "confirmed"
+        if match.accepted and reliable_key
+        else ("catalog_guess" if match.accepted or match.catalog_guess_name else match.status)
+    )
+    guess_name = "" if status == "confirmed" else (match.catalog_guess_name or match.product_name)
+    return {
+        "track_id": track_id,
+        "status": status,
+        "resolver_status": match.status,
+        "product_name": match.product_name if status == "confirmed" else "",
+        "catalog_guess_name": guess_name,
+        "barcode": match.barcode if status == "confirmed" else "",
+        "catalog_guess_barcode": match.barcode if status == "catalog_guess" else "",
+        "barcode_hint": barcode_hint,
+        "reliable_key": reliable_key,
+        "key_source": "visual_barcode_or_qr" if reliable_key else "catalog_inferred",
+        "score": match.score,
+        "margin": match.margin,
+        "accepted": match.accepted,
+        "candidate_codes": list(match.candidate_codes),
+    }
+
+
+def _visual_barcode_identity_fields(barcode: str, product_name: str) -> dict[str, str]:
+    return {
+        "product_name": product_name,
+        "barcode": barcode,
+        "qr_code_barcode": barcode,
+        "catalog_match_status": "confirmed",
+        "catalog_resolver_status": "barcode_exact",
+        "catalog_match_source": "db_hack_visual_barcode",
+        "catalog_key_source": "visual_barcode_or_qr",
+        "catalog_match_score": "1.000",
+    }
+
+
+def _visual_barcode_record(
+    track_id: str,
+    *,
+    barcode: str,
+    product_name: str,
+) -> dict[str, Any]:
+    return {
+        "track_id": track_id,
+        "status": "confirmed",
+        "resolver_status": "barcode_exact",
+        "product_name": product_name,
+        "catalog_guess_name": "",
+        "barcode": barcode,
+        "catalog_guess_barcode": "",
+        "barcode_hint": barcode,
+        "reliable_key": True,
+        "key_source": "visual_barcode_or_qr",
+        "score": 1.0,
+        "margin": 1.0,
+        "accepted": True,
+        "candidate_codes": [barcode],
+    }
 
 
 @dataclass(slots=True)
@@ -118,7 +315,7 @@ class V5BlockOcrCatalogStage(BaseStage):
         for poly, txt, conf in items:
             if poly is None or poly.size == 0 or not str(txt).strip():
                 continue
-            ys, xs = poly[:, 1], poly[:, 0]
+            ys = poly[:, 1]
             rel_h = float(ys.max() - ys.min()) / float(H)
             rel_y = float(ys.min()) / float(H)
             blocks.append({"text": str(txt), "conf": conf,
@@ -247,15 +444,17 @@ class V5BlockOcrCatalogStage(BaseStage):
     def _sku_candidates(texts: list[str]) -> list[str]:
         out: list[str] = []
         for t in texts:
-            digits = re.sub(r"\D", "", t)
-            for m in re.finditer(r"\d{12}", digits):
-                out.append(m.group(0))
-            # 11/13-digit reads: trim/keep the (27|37)-prefixed 12-window
-            if len(digits) in (11, 13, 14):
-                for i in range(0, len(digits) - 11):
-                    w = digits[i:i + 12]
-                    if w[:2] in ("27", "37"):
-                        out.append(w)
+            seen_in_text: set[str] = set()
+            for digits in _digit_runs(t):
+                if len(digits) == 12 and digits[:2] in ("27", "37"):
+                    seen_in_text.add(digits)
+                # 13/14-digit reads: trim/keep the (27|37)-prefixed 12-window.
+                if len(digits) in (13, 14):
+                    for i in range(0, len(digits) - 11):
+                        w = digits[i:i + 12]
+                        if w[:2] in ("27", "37"):
+                            seen_in_text.add(w)
+            out.extend(seen_in_text)
         return out
 
     @classmethod
@@ -278,21 +477,42 @@ class V5BlockOcrCatalogStage(BaseStage):
 
     @staticmethod
     def _consensus_sku(cands: list[str]) -> str:
+        return V5BlockOcrCatalogStage._sku_consensus_details(cands)["value"]
+
+    @staticmethod
+    def _sku_consensus_details(cands: list[str]) -> dict[str, str]:
         cands = [c for c in cands if len(c) == 12]
         if not cands:
-            return ""
+            return {"value": "", "confidence": "0.00", "method": "", "candidates": "0"}
         from collections import Counter
         # exact-value majority first (most reliable when >=2 agree)
         common, n = Counter(cands).most_common(1)[0]
         if n >= 2:
-            return common
+            return {
+                "value": common,
+                "confidence": "0.94",
+                "method": "exact_majority",
+                "candidates": str(len(cands)),
+            }
         # else per-position majority across all 12-digit reads
         out = "".join(
             Counter(c[i] for c in cands).most_common(1)[0][0]
             for i in range(12)
         )
         # structural prior: real id_sku starts 27/37 (store/category)
-        return out if out[:2] in ("27", "37") else common
+        if out[:2] in ("27", "37") and len(cands) >= 3:
+            return {
+                "value": out,
+                "confidence": "0.86",
+                "method": "per_position",
+                "candidates": str(len(cands)),
+            }
+        return {
+            "value": "",
+            "confidence": "0.00",
+            "method": "insufficient_support",
+            "candidates": str(len(cands)),
+        }
 
     @staticmethod
     def _mode(cands: list[str]) -> str:
@@ -300,6 +520,14 @@ class V5BlockOcrCatalogStage(BaseStage):
             return ""
         from collections import Counter
         return Counter(cands).most_common(1)[0][0]
+
+    @staticmethod
+    def _mode_with_support(cands: list[str], *, min_count: int) -> str:
+        if not cands:
+            return ""
+        from collections import Counter
+        value, count = Counter(cands).most_common(1)[0]
+        return value if count >= min_count else ""
 
     def run(self, ctx: PipelineContext) -> StageOutcome:
         cfg = _Cfg.from_context(ctx)
@@ -313,6 +541,7 @@ class V5BlockOcrCatalogStage(BaseStage):
             d.detection_id: str(d.attributes.get("track_id") or d.detection_id)
             for d in ctx.detections
         }
+        decoded_hints = _barcode_hints_by_track(ctx, det2track)
         frame_lookup = _build_frame_lookup(ctx.sampled_frames)
         crops = sorted(ctx.crop_candidates,
                        key=lambda c: c.quality.score, reverse=True)[:cfg.max_crops]
@@ -366,35 +595,86 @@ class V5BlockOcrCatalogStage(BaseStage):
         # one catalog resolve per track (exact name + safe barcode)
         identity: dict[str, dict] = {}
         accepted = 0
+        resolver_accepted = 0
         best_effort = 0
+        catalog_matches: list[dict[str, Any]] = []
+        fineprint_matches: list[dict[str, Any]] = []
         for tk, texts in pooled.items():
-            m = self._resolver.resolve(texts, category=cfg.category,
-                                       barcode_hint=hint.get(tk, ""),
-                                       best_effort=cfg.best_effort_name)
-            ident: dict[str, str] = {}
-            if m and m.accepted:
+            decoded_barcode_hint = _best_barcode_hint(decoded_hints.get(tk, []))
+            ocr_barcode_hint = _best_barcode_hint([], fallback=hint.get(tk, ""))
+            barcode_hint = decoded_barcode_hint or ocr_barcode_hint
+            exact_name = (
+                self._resolver.name_for_barcode(decoded_barcode_hint)
+                if decoded_barcode_hint
+                else ""
+            )
+            if exact_name:
+                ident = _visual_barcode_identity_fields(decoded_barcode_hint, exact_name)
                 accepted += 1
-                ident["product_name"] = m.product_name
-                if m.barcode:
-                    ident["barcode"] = m.barcode
-                    ident["qr_code_barcode"] = m.barcode
-            elif m and m.product_name:
-                # best-effort nearest name only — NO barcode/qr (match-key
-                # safety). Scores >= empty under the metric, never negative.
-                best_effort += 1
-                ident["product_name"] = m.product_name
+                catalog_matches.append(
+                    _visual_barcode_record(
+                        tk,
+                        barcode=decoded_barcode_hint,
+                        product_name=exact_name,
+                    )
+                )
+            else:
+                m = self._resolver.resolve(texts, category=cfg.category,
+                                           barcode_hint=barcode_hint,
+                                           best_effort=cfg.best_effort_name)
+                record = _catalog_match_record(
+                    tk,
+                    m,
+                    barcode_hint=barcode_hint,
+                    reliable_barcode_hint=decoded_barcode_hint,
+                )
+                if record:
+                    catalog_matches.append(record)
+                ident: dict[str, str] = _catalog_identity_fields(
+                    m,
+                    barcode_hint=barcode_hint,
+                    reliable_barcode_hint=decoded_barcode_hint,
+                )
+                if m and m.accepted:
+                    resolver_accepted += 1
+                if m and m.accepted and _has_reliable_catalog_key(m, barcode_hint):
+                    accepted += 1
+                elif m and (m.catalog_guess_name or m.accepted):
+                    # Best-effort nearest name only: keep it as catalog_guess_*,
+                    # never as product_name/barcode in official CSV fields.
+                    best_effort += 1
             # Fine-print consensus is independent of catalog identity and
             # strictly non-negative (none of these are GT match keys, so a
             # wrong value scores exactly like the empty we'd emit anyway).
-            sku = self._consensus_sku(sku_pool.get(tk, []))
-            if sku:
-                ident["id_sku"] = sku
-            dt = self._mode(date_pool.get(tk, []))
+            sku = self._sku_consensus_details(sku_pool.get(tk, []))
+            fineprint_matches.append(
+                {
+                    "track_id": tk,
+                    "id_sku": sku["value"],
+                    "id_sku_confidence": sku["confidence"],
+                    "id_sku_method": sku["method"],
+                    "id_sku_candidates": len(sku_pool.get(tk, [])),
+                    "date_candidates": len(date_pool.get(tk, [])),
+                    "code_candidates": len(code_pool.get(tk, [])),
+                }
+            )
+            if sku["value"]:
+                ident["id_sku"] = sku["value"]
+                ident["id_sku_source"] = f"v5_fineprint_{sku['method']}"
+                ident["id_sku_confidence"] = sku["confidence"]
+                ident["id_sku_candidates_count"] = sku["candidates"]
+            dt = self._mode_with_support(date_pool.get(tk, []), min_count=2)
             if dt:
                 ident["print_datetime"] = dt
-            code = self._mode(code_pool.get(tk, []))
+                ident["print_datetime_source"] = "v5_fineprint_exact_majority"
+                ident["print_datetime_confidence"] = "0.82"
+                ident["print_datetime_candidates_count"] = str(len(date_pool.get(tk, [])))
+            code = self._mode_with_support(code_pool.get(tk, []), min_count=2)
             if code:
                 ident["code"] = code
+                ident["code_source"] = "v5_fineprint_exact_majority"
+                ident["code_confidence"] = "0.84"
+                ident["code_candidates_count"] = str(len(code_pool.get(tk, [])))
             if ident:
                 identity[tk] = ident
 
@@ -404,16 +684,55 @@ class V5BlockOcrCatalogStage(BaseStage):
             fields.update(identity.get(rec["track"], {}))
             if fields:
                 crops_with_fields += 1
+            field_confidences = {}
+            if fields.get("id_sku") and fields.get("id_sku_confidence"):
+                field_confidences["id_sku"] = fields["id_sku_confidence"]
+            if fields.get("print_datetime") and fields.get("print_datetime_confidence"):
+                field_confidences["print_datetime"] = fields["print_datetime_confidence"]
+            if fields.get("code") and fields.get("code_confidence"):
+                field_confidences["code"] = fields["code_confidence"]
             rec["crop"].attributes["ocr"] = {
                 "text": "", "confidence": 0.0,
                 "engine": "v5_block_paddle_en", "fields": fields,
+                "field_confidences": field_confidences,
             }
+        catalog_matches_key = ""
+        if catalog_matches:
+            try:
+                catalog_matches_key = ctx.artifact_writer.upload_json(
+                    "debug/catalog_matches.json",
+                    {
+                        "tracks": len(pooled),
+                        "accepted_tracks": accepted,
+                        "resolver_accepted_tracks": resolver_accepted,
+                        "catalog_guess_tracks": best_effort,
+                        "matches": catalog_matches,
+                    },
+                )
+            except Exception:  # noqa: BLE001 - debug artifact must not break e2e
+                catalog_matches_key = ""
+        fineprint_matches_key = ""
+        if fineprint_matches:
+            try:
+                fineprint_matches_key = ctx.artifact_writer.upload_json(
+                    "debug/fineprint_matches.json",
+                    {"tracks": len(pooled), "matches": fineprint_matches},
+                )
+            except Exception:  # noqa: BLE001 - debug artifact must not break e2e
+                fineprint_matches_key = ""
         summary = {
             "enabled": True,
             "crops_ocred": len(per_crop),
             "tracks": len(pooled),
             "catalog_accepted_tracks": accepted,
+            "catalog_resolver_accepted_tracks": resolver_accepted,
             "best_effort_name_tracks": best_effort,
+            "catalog_guess_tracks": best_effort,
+            "catalog_matches_key": catalog_matches_key,
+            "fineprint_matches_key": fineprint_matches_key,
+            "tracks_with_decoded_barcode_hint": sum(
+                1 for tk in pooled if decoded_hints.get(tk)
+            ),
             "crops_with_fields": crops_with_fields,
             "tracks_with_sku": sum(
                 1 for v in identity.values() if v.get("id_sku")),

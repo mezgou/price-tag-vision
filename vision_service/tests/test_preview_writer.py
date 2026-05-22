@@ -178,3 +178,24 @@ def test_preview_writer_includes_sampling_metadata(
         "crops_enabled": True,
         "contact_sheet_enabled": True,
     }
+
+
+def test_preview_writer_keeps_catalog_guess_metadata(
+    pipeline_context,
+    in_memory_storage,
+) -> None:
+    pipeline_context.csv_rows = [
+        {
+            "filename": "video.mp4",
+            "catalog_match_status": "catalog_guess",
+            "catalog_guess_name": "Likely Wine",
+        }
+    ]
+
+    outcome = PreviewWriterStage().run(pipeline_context)
+
+    payload, _ = in_memory_storage.objects[outcome.output_summary["preview_key"]]
+    preview = json.loads(payload.decode("utf-8"))
+
+    assert preview["rows"][0]["catalog_match_status"] == "catalog_guess"
+    assert preview["rows"][0]["catalog_guess_name"] == "Likely Wine"
