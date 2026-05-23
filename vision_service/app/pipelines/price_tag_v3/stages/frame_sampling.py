@@ -9,7 +9,6 @@ from app.pipelines.base import PipelineContext, SampledFrameMetadata, StageOutco
 from app.pipelines.price_tag_cpu_v1.stages.frame_sampling import (
     FrameSamplingConfig,
     FrameSamplingStage,
-    _frame_timestamp_ms,
     _positive_capture_float,
     _resolve_sample_interval,
     build_camera_model,

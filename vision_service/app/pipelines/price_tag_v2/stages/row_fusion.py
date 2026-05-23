@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
@@ -21,9 +21,13 @@ QR_FIELD_MAP = {
     "barcode": "qr_code_barcode",
     "b": "qr_code_barcode",
     "p1": "price1_qr",
+    "price1": "price1_qr",
     "p2": "price2_qr",
+    "price2": "price2_qr",
     "p3": "price3_qr",
+    "price3": "price3_qr",
     "p4": "price4_qr",
+    "price4": "price4_qr",
     "wl1c": "wholesale_level_1_count",
     "wl1p": "wholesale_level_1_price",
     "wl2c": "wholesale_level_2_count",
@@ -68,6 +72,27 @@ PRICE_FIELDS = {
     "wholesale_level_2_price",
     "action_price_qr",
 }
+EXTRA_ROW_FIELDS = {
+    "catalog_match_status",
+    "catalog_resolver_status",
+    "catalog_match_source",
+    "catalog_key_source",
+    "catalog_withheld_reason",
+    "catalog_match_score",
+    "catalog_match_margin",
+    "catalog_candidate_codes",
+    "catalog_guess_name",
+    "catalog_guess_barcode",
+    "id_sku_source",
+    "id_sku_confidence",
+    "id_sku_candidates_count",
+    "print_datetime_source",
+    "print_datetime_confidence",
+    "print_datetime_candidates_count",
+    "code_source",
+    "code_confidence",
+    "code_candidates_count",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,9 +121,9 @@ class RowFusionConfig:
 @dataclass(slots=True)
 class _FusionGroup:
     key: str
-    detections: list[DetectionCandidate] = field(default_factory=list)
-    crops: list[CropCandidate] = field(default_factory=list)
-    symbols: list[DecodedSymbol] = field(default_factory=list)
+    detections: list[DetectionCandidate] = dataclass_field(default_factory=list)
+    crops: list[CropCandidate] = dataclass_field(default_factory=list)
+    symbols: list[DecodedSymbol] = dataclass_field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -315,12 +340,15 @@ def _fuse_group_to_row(
     _add_ocr_votes(votes=votes, crops=group.crops)
     _add_detection_votes(votes=votes, detections=group.detections)
 
+    extra_row: dict[str, str] = {}
     for field, field_votes in votes.items():
-        if field not in row:
+        if field not in row and field not in EXTRA_ROW_FIELDS:
             continue
         value = _choose_vote(field=field, votes=field_votes)
-        if value:
+        if value and field in row:
             row[field] = value
+        elif value:
+            extra_row[field] = value
 
     # Bidirectional QR<->visible backfill. Verified on all 274 GT rows:
     # qr_code_barcode==barcode 99%, price1_qr==price_default 97%,
@@ -333,6 +361,8 @@ def _fuse_group_to_row(
             row[visible_field] = qv
         elif _has_value(vv) and not _has_value(qv):
             row[qr_field] = vv
+        elif _qr_price_should_override_visible(qr_field=qr_field, qv=qv, vv=vv):
+            row[visible_field] = str(qv)
 
     _derive_cross_fields(row)
 
@@ -340,7 +370,18 @@ def _fuse_group_to_row(
         if not _has_value(row.get(field)):
             row[field] = default_absent_value
 
-    return {column: _normalize_output_value(row.get(column, "")) for column in CSV_COLUMNS}
+    normalized = {
+        column: _normalize_output_value(row.get(column, ""))
+        for column in CSV_COLUMNS
+    }
+    normalized.update(
+        {
+            field: _normalize_output_value(value)
+            for field, value in extra_row.items()
+            if field in EXTRA_ROW_FIELDS
+        }
+    )
+    return normalized
 
 
 def _to_price(value: str | None) -> float | None:
@@ -354,6 +395,25 @@ def _to_price(value: str | None) -> float | None:
     except ValueError:
         return None
     return result if result > 0 else None
+
+
+def _qr_price_should_override_visible(
+    *,
+    qr_field: str,
+    qv: str | None,
+    vv: str | None,
+) -> bool:
+    if qr_field not in PRICE_FIELDS:
+        return False
+    qr_price = _to_price(qv)
+    visible_price = _to_price(vv)
+    if qr_price is None or visible_price is None:
+        return False
+    if int(qr_price) != int(visible_price):
+        return False
+    visible_fraction = abs(visible_price - int(visible_price))
+    qr_fraction = abs(qr_price - int(qr_price))
+    return visible_fraction <= 0.005 and qr_fraction > 0.005
 
 
 _SWEETNESS_RULES: tuple[tuple[str, str], ...] = (
@@ -444,10 +504,18 @@ def _add_ocr_votes(
             continue
         ocr_payload = crop.attributes.get("ocr")
         confidence = 0.0
+        field_confidences: dict[str, Any] = {}
         if isinstance(ocr_payload, dict):
             confidence = _safe_float(ocr_payload.get("confidence"), default=0.0)
-        weight = 1.0 + confidence + float(crop.quality.score)
+            raw_field_confidences = ocr_payload.get("field_confidences")
+            if isinstance(raw_field_confidences, dict):
+                field_confidences = raw_field_confidences
         for field, value in fields.items():
+            field_confidence = _safe_float(
+                field_confidences.get(field),
+                default=confidence,
+            )
+            weight = 1.0 + field_confidence + float(crop.quality.score)
             votes[field].append(_Vote(value=str(value), weight=weight, source="ocr"))
 
 
@@ -558,6 +626,8 @@ def _stable_symbol_key(symbol: DecodedSymbol) -> str:
         digits = re.sub(r"\D+", "", parsed.get(field, ""))
         if digits:
             return f"barcode:{digits}"
+    if parsed:
+        return ""
     digits = re.sub(r"\D+", "", symbol.payload)
     if len(digits) in {12, 13}:
         return f"barcode:{digits}"

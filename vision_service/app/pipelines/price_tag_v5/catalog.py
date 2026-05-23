@@ -44,6 +44,8 @@ class CatalogMatch:
     margin: float           # gap to the runner-up
     accepted: bool          # passed the strict confidence gate
     candidate_codes: tuple[str, ...] = ()
+    catalog_guess_name: str = ""
+    status: str = "unresolved"  # confirmed | catalog_guess | unresolved
 
 
 def ean13_ok(value: str) -> bool:
@@ -289,19 +291,25 @@ class CatalogResolver:
             # Unchanged behaviour.
             barcode = ""
         # Best-effort name: when the strict gate fails but a real (>=4-char)
-        # brand token still matched, surface the nearest catalog name so the
-        # field is a plausible guess instead of blank. product_name is a
-        # text-similarity field, NOT a match key, so a wrong guess scores
-        # exactly like the empty it replaces — never negative — while a near
-        # guess can clear the 0.85 similarity bar. accepted stays False.
-        emit_name = name_ok or (best_effort and best_idf > 0.0)
+        # brand token still matched, keep the nearest catalog name as an
+        # explicit catalog guess instead of blank. product_name is a
+        # resolved-answer field, so a wrong guess must not be written there.
+        guess_name = (
+            "" if name_ok or not best_effort or best_idf <= 0.0 else best_name
+        )
         return CatalogMatch(
-            product_name=best_name if emit_name else "",
+            product_name=best_name if name_ok else "",
             barcode=barcode,
             score=round(float(best_mass), 3),
             margin=round(float(best_mass - second_mass), 3),
             accepted=name_ok,
             candidate_codes=cands,
+            catalog_guess_name=guess_name,
+            status=(
+                "confirmed"
+                if name_ok
+                else ("catalog_guess" if guess_name else "unresolved")
+            ),
         )
 
     def _distinctive_idf(self, category: str) -> float:

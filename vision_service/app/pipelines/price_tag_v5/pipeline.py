@@ -7,6 +7,7 @@ from app.pipelines.price_tag_cpu_v1.pipeline import (
     _load_yaml_config,
 )
 from app.pipelines.price_tag_cpu_v1.stages import (
+    BarcodeQrDecodeStage,
     CropExtractionStage,
     CsvWriterStage,
     DebugManifestStage,
@@ -19,8 +20,13 @@ from app.pipelines.price_tag_v2.stages import (
     TopKCropSelectionStage,
     YoloByteTrackStage,
 )
+from app.pipelines.price_tag_v4.stages import (
+    QrZoneDecodeStage,
+)
 from app.pipelines.price_tag_v5.stages import (
+    V5BarcodeBarsCropDecodeStage,
     V5BlockOcrCatalogStage,
+    V5DecodedSymbolGateStage,
     V5RowConfidenceGateStage,
     V5SpatialSlotMergeStage,
 )
@@ -47,6 +53,10 @@ class PriceTagV5Pipeline(PriceTagCpuV1Pipeline):
             CropExtractionStage(),
             TopKCropSelectionStage(),
             V5SpatialSlotMergeStage(),
+            BarcodeQrDecodeStage(),
+            QrZoneDecodeStage(),
+            V5BarcodeBarsCropDecodeStage(),
+            V5DecodedSymbolGateStage(),
             V5BlockOcrCatalogStage(),
             RowFusionStage(),
             V5RowConfidenceGateStage(),

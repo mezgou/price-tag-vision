@@ -47,7 +47,7 @@ crop_extraction:
   bbox_padding_ratio: 0.12
   min_crop_width: 50
   min_crop_height: 50
-  max_crops_per_frame: 32
+  max_crops_per_frame: 40
   max_total_crops: 900
   debug_save_crops: false
   debug_crop_jpeg_quality: 92
@@ -58,9 +58,13 @@ crop_extraction:
 
 top_k_crop_selection:
   enabled: true
-  max_crops_per_track: 8
+  # Quality mode keeps the lower-ranked crops where small QR codes often sit.
+  # On 26_12-20 quality-window A/B, 10 -> 20 lifted MFA 0.5670 -> 0.5771.
+  max_crops_per_track: 20
   max_total_crops: 900
   min_quality_score: 0.05
+  temporal_diversity_enabled: false
+  temporal_diversity_buckets: 5
 
 v5_spatial_slot_merge:
   enabled: true
@@ -77,6 +81,75 @@ v5_spatial_slot_merge:
   overlap_absorb_min_iou: 0.55
   overlap_absorb_max_detections: 2
 
+barcode_qr_decode:
+  enabled: true
+  max_crops: 900
+  min_crop_quality_score: 0.05
+  # Precision stays in V5DecodedSymbolGateStage; this stage favors recall across
+  # the selected top-k crops because QR can be visible only in lower-ranked
+  # frames. Fast runs can override this back to 3.
+  max_crops_per_track: 0
+  decoders:
+    opencv_qr_detector:
+      enabled: true
+    optional_zxingcpp_qr_only:
+      enabled: false
+    optional_zxingcpp:
+      enabled: true
+    optional_pyzbar:
+      enabled: true
+    optional_aruco:
+      enabled: false
+  variants:
+    original: true
+    grayscale: true
+    clahe: false
+    sharpened: false
+    resized_x2: true
+    resized_x3: true
+    resized_x4: false
+    adaptive_threshold: true
+    right_angle_rotations: false
+    small_angle_rotations: false
+  stop_after_first_success_per_crop: true
+  max_payload_preview_length: 500
+
+barcode_qr_zone_decode:
+  enabled: true
+  max_crops: 120
+  min_crop_quality_score: 0.12
+  max_crops_per_track: 3
+  enabled_zones:
+    - right_mid
+    - upper_right
+    - qr_square
+  enabled_variants:
+    - x4_otsu
+    - x4_gray
+    - resized_x2
+  # Staged fallback: run expensive targeted QR zones only when the main decode
+  # has not already produced QR/EAN evidence. This preserves fallback recall
+  # (for example 25_12-20 quick) without paying the zero-hit cost on QR-rich
+  # quality windows.
+  skip_if_code_evidence_present: true
+  stop_after_first_success_per_crop: true
+
+v5_barcode_bars_decode:
+  enabled: true
+  max_crops: 360
+  min_crop_quality_score: 0.05
+  max_crops_per_track: 3
+  skip_if_code_evidence_present: true
+  min_confidence: 0.74
+  stop_after_first_success_per_track: true
+
+v5_decoded_symbol_gate:
+  enabled: true
+  db_hack_path: data/db_hack.csv
+  require_ean13_checksum: true
+  require_catalog_code_for_match_key: true
+  keep_rejected_symbols_artifact: true
+
 # v5 identity engine: one fast full-crop PaddleOCR-en pass per crop,
 # block-geometry price parse, per-slot brand-token pool -> CatalogResolver
 # (db_hack.csv) -> exact product_name + safe barcode. No GT used.
@@ -91,11 +164,12 @@ v5_block_ocr:
   # worth a precision regression on the primary wine scenario.
   category: wine
   db_path: data/db_hack.csv
-  # When the strict confidence gate fails but a real brand token still
-  # matched, emit the NEAREST catalog name (no barcode — match-key safety
-  # is absolute). product_name is a text-similarity field, not a join key,
-  # so a near guess can only match or score like the empty it replaces —
-  # never negative — and the CSV reads as resolved rather than blank.
+  # High-upscale bottom-strip OCR was measured at 0 SKU/date/code hits on the
+  # close clip; keep a small diagnostic budget without spending six passes on
+  # every track in the final CSV run.
+  fineprint_per_track: 2
+  # Current behavior: best_effort_name records catalog_guess_* metadata only;
+  # product_name remains reserved for confirmed identity.
   best_effort_name: true
 
 row_fusion:
@@ -105,16 +179,23 @@ row_fusion:
 
 v5_row_confidence_gate:
   enabled: true
-  # "recall" (default): emit every localized tag — contest score is
-  # physically capped on this footage regardless, so surfacing all detected
-  # tags (correct bbox + color + structural fields) is strictly more useful
-  # MVP output than withholding ~half of them. "strict": identity/price
-  # evidence only (old behavior). Spatial dedup collapses same-physical-tag
-  # fragments (high raw-bbox IoU + name-compatible) so recall mode stays
-  # clean. A per-row confidence/provenance side-car is written to
-  # outputs/<job>/debug/row_confidence.json for downstream triage.
-  mode: recall
+  # "balanced" is the final-CSV mode: suppress weak localized/color-only
+  # rows and keep rows with a match key or enough independent evidence.
+  # "recall" remains available for diagnostics and can still be enabled via
+  # request config; suppressed candidates are recorded in row_confidence.json.
+  # "strict" keeps any identity/text/price evidence without confidence
+  # thresholding.
+  mode: balanced
   keep_price_only_rows: true
+  # Precision-first CSV: weak card-only rows can greedily claim nearby GT rows
+  # and lower MFA. 0.40 keeps identity/full-price rows while suppressing the
+  # no-default low-confidence tail; use 0.30/recall for diagnostics.
+  min_confidence: 0.40
+  # If confirmed QR/barcode+catalog rows exist in the same run, keep them first
+  # and require stronger evidence for non-identity price-only rows. If no
+  # identity rows exist, the 0.40 behavior above is unchanged.
+  suppress_weak_when_identity_present: true
+  identity_present_min_confidence: 0.45
   spatial_dedup_iou: 0.60
 
 artifacts:
@@ -129,6 +210,10 @@ stages:
   - CropExtractionStage
   - TopKCropSelectionStage
   - V5SpatialSlotMergeStage
+  - BarcodeQrDecodeStage
+  - QrZoneDecodeStage
+  - V5BarcodeBarsCropDecodeStage
+  - V5DecodedSymbolGateStage
   - V5BlockOcrCatalogStage
   - RowFusionStage
   - V5RowConfidenceGateStage

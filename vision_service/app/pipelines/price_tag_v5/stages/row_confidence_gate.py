@@ -6,36 +6,69 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.pipelines.base import BaseStage, PipelineContext, StageOutcome
+from app.pipelines.price_tag_v5.catalog import ean13_ok, to_ean13
 from app.schemas.detections import BoundingBox
 from app.utils.image_processing import bbox_iou
 
 NO_VALUE = "нет"
 MATCH_KEY_FIELDS = ("barcode", "qr_code_barcode")
 PRICE_FIELDS = ("price_card", "price_default", "price1_qr", "price4_qr")
-TEXT_EVIDENCE_FIELDS = ("product_name", "id_sku", "print_datetime", "code")
+FINEPRINT_EVIDENCE_FIELDS = ("id_sku", "print_datetime", "code")
+CATALOG_DEBUG_FIELDS = (
+    "catalog_match_status",
+    "catalog_resolver_status",
+    "catalog_match_source",
+    "catalog_key_source",
+    "catalog_withheld_reason",
+    "catalog_match_score",
+    "catalog_match_margin",
+    "catalog_candidate_codes",
+    "catalog_guess_name",
+    "catalog_guess_barcode",
+    "id_sku_source",
+    "id_sku_confidence",
+    "id_sku_candidates_count",
+    "print_datetime_source",
+    "print_datetime_confidence",
+    "print_datetime_candidates_count",
+    "code_source",
+    "code_confidence",
+    "code_candidates_count",
+)
 
 
 @dataclass(frozen=True, slots=True)
 class RowConfidenceGateConfig:
     enabled: bool
-    mode: str  # "recall" (default) keeps every localized tag; "strict" keeps
-    # only rows carrying identity/price evidence.
+    mode: str  # "balanced" for final CSV, "recall" for diagnostics.
     keep_price_only_rows: bool
     spatial_dedup_iou: float  # 0 disables; else collapse same-physical-tag rows
+    min_confidence: float
+    suppress_weak_when_identity_present: bool
+    identity_present_min_confidence: float
 
     @classmethod
     def from_context(cls, context: PipelineContext) -> "RowConfidenceGateConfig":
         raw = context.config.get("v5_row_confidence_gate", {})
         if not isinstance(raw, dict):
             raw = {}
-        mode = str(raw.get("mode", "recall")).strip().lower()
-        if mode not in {"recall", "strict"}:
-            mode = "recall"
+        mode = str(raw.get("mode", "balanced")).strip().lower()
+        if mode not in {"balanced", "recall", "strict"}:
+            mode = "balanced"
         return cls(
             enabled=_bool(raw.get("enabled"), default=True),
             mode=mode,
             keep_price_only_rows=_bool(raw.get("keep_price_only_rows"), default=True),
             spatial_dedup_iou=_float(raw.get("spatial_dedup_iou"), 0.60),
+            min_confidence=_float(raw.get("min_confidence"), 0.40),
+            suppress_weak_when_identity_present=_bool(
+                raw.get("suppress_weak_when_identity_present"),
+                default=True,
+            ),
+            identity_present_min_confidence=_float(
+                raw.get("identity_present_min_confidence"),
+                0.45,
+            ),
         )
 
 
@@ -49,6 +82,11 @@ class V5RowConfidenceGateStage(BaseStage):
             "rows": len(context.csv_rows),
             "mode": config.mode,
             "spatial_dedup_iou": config.spatial_dedup_iou,
+            "min_confidence": config.min_confidence,
+            "suppress_weak_when_identity_present": (
+                config.suppress_weak_when_identity_present
+            ),
+            "identity_present_min_confidence": config.identity_present_min_confidence,
         }
 
     def run(self, context: PipelineContext) -> StageOutcome:
@@ -65,23 +103,24 @@ class V5RowConfidenceGateStage(BaseStage):
             return StageOutcome(output_summary=summary)
 
         input_rows = list(context.csv_rows)
-        if config.mode == "strict":
-            gated = [
-                row
-                for row in input_rows
-                if row_has_v5_evidence(
-                    row, keep_price_only=config.keep_price_only_rows
-                )
-            ]
-        else:
-            # Recall mode: every row that localizes a real detected tag is
-            # useful product output (correct bbox + color + structural
-            # fields). The contest score is physically capped regardless, so
-            # withholding localized tags only loses usefulness. Drop only the
-            # genuinely empty (no usable bbox).
-            gated = [row for row in input_rows if _row_bbox(row) is not None]
+        decisions = [
+            (index, row, *_gate_decision(row, config))
+            for index, row in enumerate(input_rows)
+        ]
+        decisions = _apply_identity_present_gate(decisions, config)
+        gated = [row for _, row, keep, _reason in decisions if keep]
+        identity_present_gate_active = (
+            config.mode == "balanced"
+            and config.suppress_weak_when_identity_present
+            and any(_has_confirmed_identity(row) for _, row, keep, _ in decisions if keep)
+        )
+        identity_present_suppressed_rows = sum(
+            1 for _, _, keep, reason in decisions
+            if not keep and reason == "below_identity_present_min_confidence"
+        )
 
         deduped, dedup_groups = _spatial_dedup(gated, config.spatial_dedup_iou)
+        kept_ids = {id(row) for row in deduped}
 
         # Emit best-first. The official eval is order-independent for the
         # primary (barcode) key and, for the IoU fallback, the FIRST listed
@@ -100,10 +139,27 @@ class V5RowConfidenceGateStage(BaseStage):
 
         side_car = {
             "mode": config.mode,
+            "diagnostic_note": (
+                "Set v5_row_confidence_gate.mode=recall to emit every "
+                "localized candidate into result.csv. This side-car always "
+                "keeps suppressed candidate provenance for triage."
+            ),
             "spatial_dedup_iou": config.spatial_dedup_iou,
+            "min_confidence": config.min_confidence,
+            "identity_present_min_confidence": config.identity_present_min_confidence,
+            "identity_present_gate_active": identity_present_gate_active,
             "input_rows": len(input_rows),
             "gated_rows": len(gated),
             "kept_rows": len(kept),
+            "suppressed_rows": len(input_rows) - len(gated),
+            "deduped_rows": len(gated) - len(kept),
+            "identity_present_suppressed_rows": identity_present_suppressed_rows,
+            "catalog_guess_candidates": sum(
+                1 for row in input_rows if has_value(row.get("catalog_guess_name", ""))
+            ),
+            "catalog_guess_rows": sum(
+                1 for row in kept if has_value(row.get("catalog_guess_name", ""))
+            ),
             "rows": [
                 {
                     "index": i,
@@ -116,11 +172,25 @@ class V5RowConfidenceGateStage(BaseStage):
                     ],
                     "product_name": kept[i].get("product_name", ""),
                     "barcode": kept[i].get("barcode", ""),
+                    **_catalog_debug_fields(kept[i]),
                     "confidence": prov["confidence"],
                     "tier": prov["tier"],
                     "evidence": prov["evidence"],
                 }
                 for i, prov in enumerate(provenance)
+            ],
+            "candidates": [
+                _side_car_row(
+                    original_index=index,
+                    row=row,
+                    emitted=id(row) in kept_ids,
+                    suppressed_reason=(
+                        "" if id(row) in kept_ids else (
+                            "deduped" if keep else reason
+                        )
+                    ),
+                )
+                for index, row, keep, reason in decisions
             ],
         }
         try:
@@ -134,14 +204,21 @@ class V5RowConfidenceGateStage(BaseStage):
         summary = {
             "enabled": True,
             "mode": config.mode,
+            "min_confidence": config.min_confidence,
+            "identity_present_min_confidence": config.identity_present_min_confidence,
+            "identity_present_gate_active": identity_present_gate_active,
             "input_rows": len(input_rows),
             "gated_rows": len(gated),
             "kept_rows": len(kept),
             "suppressed_rows": len(input_rows) - len(gated),
             "deduped_rows": len(gated) - len(kept),
             "dedup_groups": dedup_groups,
+            "identity_present_suppressed_rows": identity_present_suppressed_rows,
             "identity_rows": sum(
                 1 for p in provenance if "identity" in p["evidence"]
+            ),
+            "catalog_guess_rows": sum(
+                1 for row in kept if has_value(row.get("catalog_guess_name", ""))
             ),
             "high_confidence_rows": sum(1 for c in confidences if c >= 0.6),
             "mean_confidence": (
@@ -162,14 +239,119 @@ def row_has_v5_evidence(
     keep_price_only: bool = True,
 ) -> bool:
     for field in MATCH_KEY_FIELDS:
-        if len(re.sub(r"\D+", "", row.get(field, ""))) in {12, 13}:
+        if _trusted_ean13(row.get(field, "")):
             return True
-    for field in TEXT_EVIDENCE_FIELDS:
-        if has_value(row.get(field, "")):
+    if has_value(row.get("product_name", "")):
+        return True
+    for field in FINEPRINT_EVIDENCE_FIELDS:
+        if _strong_fineprint(row, field):
             return True
     if keep_price_only:
         return any(is_price(row.get(field, "")) for field in PRICE_FIELDS)
     return False
+
+
+def _gate_decision(
+    row: dict[str, str],
+    config: RowConfidenceGateConfig,
+) -> tuple[bool, str]:
+    has_bbox = _row_bbox(row) is not None
+    if config.mode == "recall":
+        return (True, "") if has_bbox else (False, "no_bbox")
+    if config.mode == "strict":
+        keep = row_has_v5_evidence(
+            row,
+            keep_price_only=config.keep_price_only_rows,
+        )
+        return (True, "") if keep else (False, "no_evidence")
+
+    if not has_bbox:
+        return False, "no_bbox"
+    if _has_match_key(row):
+        return True, ""
+    if not row_has_v5_evidence(row, keep_price_only=config.keep_price_only_rows):
+        return False, "no_evidence"
+    confidence = _row_confidence(row)["confidence"]
+    if confidence < config.min_confidence:
+        return False, "below_min_confidence"
+    return True, ""
+
+
+def _apply_identity_present_gate(
+    decisions: list[tuple[int, dict[str, str], bool, str]],
+    config: RowConfidenceGateConfig,
+) -> list[tuple[int, dict[str, str], bool, str]]:
+    if config.mode != "balanced" or not config.suppress_weak_when_identity_present:
+        return decisions
+    if not any(_has_confirmed_identity(row) for _, row, keep, _ in decisions if keep):
+        return decisions
+
+    adjusted: list[tuple[int, dict[str, str], bool, str]] = []
+    for index, row, keep, reason in decisions:
+        if (
+            keep
+            and not _has_confirmed_identity(row)
+            and _is_weak_price_only_row(row)
+            and _row_confidence(row)["confidence"] < config.identity_present_min_confidence
+        ):
+            adjusted.append(
+                (index, row, False, "below_identity_present_min_confidence")
+            )
+        else:
+            adjusted.append((index, row, keep, reason))
+    return adjusted
+
+
+def _has_match_key(row: dict[str, str]) -> bool:
+    return any(_trusted_ean13(row.get(field, "")) for field in MATCH_KEY_FIELDS)
+
+
+def _has_confirmed_identity(row: dict[str, str]) -> bool:
+    return _has_match_key(row) and has_value(row.get("product_name", ""))
+
+
+def _is_weak_price_only_row(row: dict[str, str]) -> bool:
+    if _has_match_key(row) or has_value(row.get("product_name", "")):
+        return False
+    if any(_strong_fineprint(row, field) for field in FINEPRINT_EVIDENCE_FIELDS):
+        return False
+    return any(is_price(row.get(field, "")) for field in PRICE_FIELDS)
+
+
+def _side_car_row(
+    *,
+    original_index: int,
+    row: dict[str, str],
+    emitted: bool,
+    suppressed_reason: str,
+) -> dict[str, Any]:
+    prov = _row_confidence(row)
+    return {
+        "original_index": original_index,
+        "frame_timestamp": row.get("frame_timestamp", ""),
+        "bbox": [
+            row.get("x_min", ""),
+            row.get("y_min", ""),
+            row.get("x_max", ""),
+            row.get("y_max", ""),
+        ],
+        "product_name": row.get("product_name", ""),
+        "barcode": row.get("barcode", ""),
+        **_catalog_debug_fields(row),
+        "confidence": prov["confidence"],
+        "tier": prov["tier"],
+        "evidence": prov["evidence"],
+        "emitted": emitted,
+        "suppressed_reason": suppressed_reason,
+    }
+
+
+def _catalog_debug_fields(row: dict[str, str]) -> dict[str, str]:
+    return {
+        field: str(row.get(field, ""))
+        for field in CATALOG_DEBUG_FIELDS
+        if has_value(str(row.get(field, "")))
+    }
 
 
 def _row_confidence(row: dict[str, str]) -> dict[str, Any]:
@@ -182,11 +364,9 @@ def _row_confidence(row: dict[str, str]) -> dict[str, Any]:
     """
     evidence: list[str] = []
     score = 0.0
-    has_barcode = any(
-        len(re.sub(r"\D+", "", row.get(f, ""))) in {12, 13}
-        for f in MATCH_KEY_FIELDS
-    )
+    has_barcode = any(_trusted_ean13(row.get(f, "")) for f in MATCH_KEY_FIELDS)
     has_name = has_value(row.get("product_name", ""))
+    has_inverted_price_pair = _has_inverted_price_pair(row)
     if has_barcode and has_name:
         evidence.append("identity")
         score += 0.40
@@ -199,11 +379,20 @@ def _row_confidence(row: dict[str, str]) -> dict[str, Any]:
     if is_price(row.get("price_card", "")):
         evidence.append("price_card")
         score += 0.15
-    if is_price(row.get("price_default", "")):
+    if is_price(row.get("price_default", "")) and not has_inverted_price_pair:
         evidence.append("price_default")
         score += 0.08
-    if has_value(row.get("discount_amount", "")):
+    if has_value(row.get("discount_amount", "")) and not has_inverted_price_pair:
         evidence.append("discount")
+        score += 0.05
+    if _strong_fineprint(row, "id_sku"):
+        evidence.append("id_sku")
+        score += 0.22
+    if _strong_fineprint(row, "print_datetime"):
+        evidence.append("print_datetime")
+        score += 0.08
+    if has_value(row.get("code", "")) and _fineprint_confidence(row, "code") >= 0.75:
+        evidence.append("code")
         score += 0.05
     if has_value(row.get("color", "")):
         evidence.append("color")
@@ -214,6 +403,42 @@ def _row_confidence(row: dict[str, str]) -> dict[str, Any]:
     score = round(min(score, 1.0), 4)
     tier = "high" if score >= 0.6 else ("medium" if score >= 0.3 else "low")
     return {"confidence": score, "tier": tier, "evidence": evidence}
+
+
+def _trusted_ean13(value: str | None) -> bool:
+    code = to_ean13(re.sub(r"\D+", "", str(value or "")))
+    return bool(code and ean13_ok(code))
+
+
+def _has_inverted_price_pair(row: dict[str, str]) -> bool:
+    default = _price_decimal(row.get("price_default"))
+    card = _price_decimal(row.get("price_card"))
+    if default is None or card is None:
+        return False
+    return card > default + Decimal("0.01")
+
+
+def _price_decimal(value: str | None) -> Decimal | None:
+    text = str(value or "").strip().replace(" ", "").replace(",", ".")
+    text = re.sub(r"[^0-9.\-]", "", text)
+    if not text or text in {"-", "."}:
+        return None
+    try:
+        parsed = Decimal(text)
+    except InvalidOperation:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _fineprint_confidence(row: dict[str, str], field: str) -> float:
+    try:
+        return float(str(row.get(f"{field}_confidence", "") or "0").replace(",", "."))
+    except ValueError:
+        return 0.0
+
+
+def _strong_fineprint(row: dict[str, str], field: str) -> bool:
+    return has_value(row.get(field, "")) and _fineprint_confidence(row, field) >= 0.75
 
 
 def _spatial_dedup(
