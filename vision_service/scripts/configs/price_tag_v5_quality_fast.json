@@ -1,0 +1,41 @@
+{
+  "barcode_qr_decode": {
+    "decoders": {
+      "opencv_qr_detector": {
+        "enabled": false
+      },
+      "optional_zxingcpp_qr_only": {
+        "enabled": false
+      },
+      "optional_zxingcpp": {
+        "enabled": true
+      },
+      "optional_pyzbar": {
+        "enabled": false
+      }
+    }
+  },
+  "barcode_qr_zone_decode": {
+    "enabled": true,
+    "max_crops": 96,
+    "min_crop_quality_score": 0.12,
+    "max_crops_per_track": 3,
+    "enabled_zones": [
+      "right_mid",
+      "upper_right",
+      "qr_square"
+    ],
+    "enabled_variants": [
+      "x4_otsu",
+      "x4_gray",
+      "resized_x2"
+    ]
+  },
+  "v5_barcode_bars_decode": {
+    "enabled": false
+  },
+  "v5_block_ocr": {
+    "fineprint_per_track": 0,
+    "max_crops": 300
+  }
+}

@@ -11,6 +11,7 @@ from app.pipelines.price_tag_cpu_v1.stages.barcode_qr_decode import (
     _duration_ms,
     _load_crop_image,
 )
+from app.pipelines.price_tag_v2.stages.row_fusion import parse_qr_payload
 from app.pipelines.price_tag_v3.stages.barcode_bars_decode import (
     _barcode_band,
     _barcode_variants,
@@ -19,6 +20,8 @@ from app.pipelines.price_tag_v3.stages.barcode_bars_decode import (
     _decode_zxingcpp,
     _ean13_ok,
 )
+from app.pipelines.price_tag_v5.catalog import ean13_ok as _v5_ean13_ok
+from app.pipelines.price_tag_v5.catalog import to_ean13
 from app.schemas.detections import DecodeAttempt, DecodedSymbol
 
 
@@ -27,6 +30,8 @@ class V5BarcodeBarsCropConfig:
     enabled: bool
     max_crops: int
     min_crop_quality_score: float
+    max_crops_per_track: int
+    skip_if_code_evidence_present: bool
     min_confidence: float
     stop_after_first_success_per_track: bool
 
@@ -39,6 +44,11 @@ class V5BarcodeBarsCropConfig:
             enabled=_bool(raw.get("enabled"), default=True),
             max_crops=_positive_int(raw.get("max_crops"), 300),
             min_crop_quality_score=_float(raw.get("min_crop_quality_score"), 0.05),
+            max_crops_per_track=_non_negative_int(raw.get("max_crops_per_track"), 0),
+            skip_if_code_evidence_present=_bool(
+                raw.get("skip_if_code_evidence_present"),
+                default=True,
+            ),
             min_confidence=_float(raw.get("min_confidence"), 0.74),
             stop_after_first_success_per_track=_bool(
                 raw.get("stop_after_first_success_per_track"),
@@ -57,6 +67,8 @@ class V5BarcodeBarsCropDecodeStage(BaseStage):
             "crops_count": len(context.crop_candidates),
             "max_crops": config.max_crops,
             "min_crop_quality_score": config.min_crop_quality_score,
+            "max_crops_per_track": config.max_crops_per_track,
+            "skip_if_code_evidence_present": config.skip_if_code_evidence_present,
             "min_confidence": config.min_confidence,
         }
 
@@ -73,7 +85,7 @@ class V5BarcodeBarsCropDecodeStage(BaseStage):
             )
 
         frame_lookup = _build_frame_lookup(context.sampled_frames)
-        eligible = [
+        quality_eligible = [
             crop
             for crop in sorted(
                 context.crop_candidates,
@@ -81,7 +93,22 @@ class V5BarcodeBarsCropDecodeStage(BaseStage):
                 reverse=True,
             )
             if crop.quality.score >= config.min_crop_quality_score
-        ][: config.max_crops]
+        ]
+        coded_tracks = (
+            _ean_coded_tracks(context.decoded_symbols)
+            if config.skip_if_code_evidence_present
+            else set()
+        )
+        eligible = _cap_crops_per_track(
+            quality_eligible,
+            max_total=config.max_crops,
+            max_per_track=config.max_crops_per_track,
+            skip_track_ids=coded_tracks,
+        )
+        skipped_by_track_cap = max(len(quality_eligible) - len(eligible), 0)
+        skipped_by_code_evidence = sum(
+            1 for crop in quality_eligible if _track_id(crop) in coded_tracks
+        )
         seen = {
             (symbol.detection_id, re.sub(r"\D+", "", symbol.payload))
             for symbol in context.decoded_symbols
@@ -187,6 +214,9 @@ class V5BarcodeBarsCropDecodeStage(BaseStage):
         summary = {
             "enabled": True,
             "crops_processed": crops_processed,
+            "crops_skipped_by_track_cap": skipped_by_track_cap,
+            "crops_skipped_by_code_evidence": skipped_by_code_evidence,
+            "tracks_skipped_by_code_evidence": len(coded_tracks),
             "decode_attempts": len(attempts),
             "hits": len(symbols),
             "tracks_with_hit": len(tracks_with_hit),
@@ -202,6 +232,61 @@ def _track_id(crop: Any) -> str:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return crop.detection_id
+
+
+def _track_id_from_symbol(symbol: DecodedSymbol) -> str:
+    value = symbol.attributes.get("track_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return symbol.detection_id
+
+
+def _ean_coded_tracks(symbols: list[DecodedSymbol]) -> set[str]:
+    return {
+        _track_id_from_symbol(symbol)
+        for symbol in symbols
+        if _trusted_ean13_from_payload(symbol.payload)
+    }
+
+
+def _trusted_ean13_from_payload(payload: str) -> str:
+    parsed = parse_qr_payload(str(payload or ""))
+    values = [parsed.get("barcode", ""), parsed.get("qr_code_barcode", "")]
+    values.append(str(payload or ""))
+    for value in values:
+        code = to_ean13(re.sub(r"\D+", "", value))
+        if code and _v5_ean13_ok(code):
+            return code
+    return ""
+
+
+def _has_code_evidence(symbols: list[DecodedSymbol]) -> bool:
+    return any(_trusted_ean13_from_payload(symbol.payload) for symbol in symbols)
+
+
+def _cap_crops_per_track(
+    crops: list[Any],
+    *,
+    max_total: int,
+    max_per_track: int,
+    skip_track_ids: set[str] | None = None,
+) -> list[Any]:
+    skip_track_ids = skip_track_ids or set()
+    selected: list[Any] = []
+    by_track: dict[str, int] = {}
+    for crop in crops:
+        if len(selected) >= max_total:
+            break
+        track_id = _track_id(crop)
+        if track_id in skip_track_ids:
+            continue
+        if max_per_track > 0:
+            seen = by_track.get(track_id, 0)
+            if seen >= max_per_track:
+                continue
+            by_track[track_id] = seen + 1
+        selected.append(crop)
+    return selected
 
 
 def _bool(value: Any, *, default: bool) -> bool:
@@ -224,6 +309,14 @@ def _positive_int(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def _non_negative_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(default if value is None else value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
 
 
 def _float(value: Any, default: float) -> float:

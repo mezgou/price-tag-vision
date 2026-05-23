@@ -15,6 +15,7 @@ from app.utils.decoding import DecodeVariantImage, build_decode_variants, normal
 from app.utils.image_processing import clip_bbox_to_frame
 
 OPENCV_QR_DECODER = "opencv_qr_detector"
+OPTIONAL_ZXINGCPP_QR_ONLY_DECODER = "zxingcpp_qr_only"
 OPTIONAL_ZXINGCPP_DECODER = "zxingcpp"
 OPTIONAL_PYZBAR_DECODER = "pyzbar"
 OPTIONAL_ARUCO_DECODER = "aruco_qr"
@@ -26,11 +27,13 @@ class BarcodeQrDecodeConfig:
     max_crops: int
     min_crop_quality_score: float
     opencv_qr_detector_enabled: bool
+    optional_zxingcpp_qr_only_enabled: bool
     optional_zxingcpp_enabled: bool
     optional_pyzbar_enabled: bool
     optional_aruco_enabled: bool
     variants: dict[str, bool]
     stop_after_first_success_per_crop: bool
+    max_crops_per_track: int
     max_payload_preview_length: int
     warnings: list[str]
 
@@ -78,6 +81,12 @@ class BarcodeQrDecodeConfig:
                 raw_decoders.get(OPENCV_QR_DECODER),
                 default=True,
                 field_name=OPENCV_QR_DECODER,
+                warnings=warnings,
+            ),
+            optional_zxingcpp_qr_only_enabled=_decode_enabled_flag(
+                raw_decoders.get("optional_zxingcpp_qr_only"),
+                default=False,
+                field_name="optional_zxingcpp_qr_only",
                 warnings=warnings,
             ),
             optional_zxingcpp_enabled=_decode_enabled_flag(
@@ -166,6 +175,12 @@ class BarcodeQrDecodeConfig:
                 field_name="stop_after_first_success_per_crop",
                 warnings=warnings,
             ),
+            max_crops_per_track=_coerce_non_negative_int(
+                raw_config.get("max_crops_per_track"),
+                default=0,
+                field_name="max_crops_per_track",
+                warnings=warnings,
+            ),
             max_payload_preview_length=_coerce_positive_int(
                 raw_config.get("max_payload_preview_length"),
                 default=300,
@@ -179,6 +194,8 @@ class BarcodeQrDecodeConfig:
         decoders: list[str] = []
         if self.opencv_qr_detector_enabled:
             decoders.append(OPENCV_QR_DECODER)
+        if self.optional_zxingcpp_qr_only_enabled:
+            decoders.append(OPTIONAL_ZXINGCPP_QR_ONLY_DECODER)
         if self.optional_zxingcpp_enabled:
             decoders.append(OPTIONAL_ZXINGCPP_DECODER)
         if self.optional_pyzbar_enabled:
@@ -211,6 +228,7 @@ class BarcodeQrDecodeStage(BaseStage):
             "enabled_variants": [
                 name for name, is_enabled in config.variants.items() if is_enabled
             ],
+            "max_crops_per_track": config.max_crops_per_track,
         }
 
     def run(self, context: PipelineContext) -> StageOutcome:
@@ -263,7 +281,7 @@ class BarcodeQrDecodeStage(BaseStage):
         attempts: list[DecodeAttempt] = []
         decoded_symbols: list[DecodedSymbol] = []
 
-        eligible_crops = [
+        quality_eligible_crops = [
             crop
             for crop in sorted(
                 context.crop_candidates,
@@ -271,10 +289,19 @@ class BarcodeQrDecodeStage(BaseStage):
                 reverse=True,
             )
             if crop.quality.score >= config.min_crop_quality_score
-        ][: config.max_crops]
+        ]
+        eligible_crops = _cap_crops_per_track(
+            quality_eligible_crops,
+            max_total=config.max_crops,
+            max_per_track=config.max_crops_per_track,
+        )
 
         crops_processed = 0
-        skipped_low_quality = max(len(context.crop_candidates) - len(eligible_crops), 0)
+        skipped_low_quality = max(
+            len(context.crop_candidates) - len(quality_eligible_crops),
+            0,
+        )
+        skipped_by_track_cap = max(len(quality_eligible_crops) - len(eligible_crops), 0)
 
         for crop in eligible_crops:
             crop_image = _load_crop_image(crop=crop, frame_lookup=frame_lookup)
@@ -375,6 +402,7 @@ class BarcodeQrDecodeStage(BaseStage):
                                 bbox=hit.bbox,
                                 attributes={
                                     **hit.attributes,
+                                    "track_id": crop.attributes.get("track_id", ""),
                                     "crop_quality_score": crop.quality.score,
                                 },
                             )
@@ -396,6 +424,7 @@ class BarcodeQrDecodeStage(BaseStage):
                 "enabled": True,
                 "crops_processed": crops_processed,
                 "crops_skipped_low_quality": skipped_low_quality,
+                "crops_skipped_by_track_cap": skipped_by_track_cap,
                 "decode_attempts_count": len(attempts),
                 "decoded_symbols_count": len(decoded_symbols),
                 "decoded_symbols_by_type": context.decoded_symbols_by_type(),
@@ -422,6 +451,19 @@ def _resolve_decoder_runners(
                 ),
             )
         )
+
+    if config.optional_zxingcpp_qr_only_enabled:
+        if find_spec("zxingcpp") is None:
+            warnings.append(
+                "optional_zxingcpp_qr_only decoder was enabled in config but zxingcpp is not installed."
+            )
+        else:
+            runners.append(
+                (
+                    OPTIONAL_ZXINGCPP_QR_ONLY_DECODER,
+                    _decode_with_optional_zxingcpp_qr_only,
+                )
+            )
 
     if config.optional_zxingcpp_enabled:
         if find_spec("zxingcpp") is None:
@@ -571,6 +613,27 @@ def _load_crop_image(
     return crop_image
 
 
+def _cap_crops_per_track(
+    crops: list[CropCandidate],
+    *,
+    max_total: int,
+    max_per_track: int,
+) -> list[CropCandidate]:
+    selected: list[CropCandidate] = []
+    by_track: dict[str, int] = {}
+    for crop in crops:
+        if len(selected) >= max_total:
+            break
+        if max_per_track > 0:
+            track_id = str(crop.attributes.get("track_id") or crop.detection_id)
+            seen = by_track.get(track_id, 0)
+            if seen >= max_per_track:
+                continue
+            by_track[track_id] = seen + 1
+        selected.append(crop)
+    return selected
+
+
 def _decode_with_opencv_qr_detector(
     *,
     detector: cv2.QRCodeDetector,
@@ -667,6 +730,47 @@ def _decode_with_optional_zxingcpp(variant: DecodeVariantImage) -> list[DecoderH
                 confidence=_decoder_confidence(decoder=OPTIONAL_ZXINGCPP_DECODER, variant=variant.name),
                 bbox=None,
                 attributes={"format": format_name},
+            )
+        )
+
+    return hits
+
+
+def _decode_with_optional_zxingcpp_qr_only(
+    variant: DecodeVariantImage,
+) -> list[DecoderHit]:
+    import zxingcpp  # type: ignore[import-not-found]
+
+    barcode_format = getattr(zxingcpp, "BarcodeFormat", None)
+    qr_code_format = getattr(barcode_format, "QRCode", None)
+    kwargs: dict[str, Any] = {
+        "try_rotate": True,
+        "try_downscale": True,
+        "try_invert": True,
+    }
+    if qr_code_format is not None:
+        kwargs["formats"] = qr_code_format
+
+    hits: list[DecoderHit] = []
+    for result in zxingcpp.read_barcodes(variant.image, **kwargs):
+        payload = normalize_decoded_payload(getattr(result, "text", ""))
+        if not payload:
+            continue
+
+        format_name = str(getattr(result, "format", "unknown")).lower()
+        if "qr" not in format_name:
+            continue
+
+        hits.append(
+            DecoderHit(
+                payload=payload,
+                symbol_type="qr",
+                confidence=_decoder_confidence(
+                    decoder=OPTIONAL_ZXINGCPP_QR_ONLY_DECODER,
+                    variant=variant.name,
+                ),
+                bbox=None,
+                attributes={"format": format_name, "qr_only": True},
             )
         )
 
@@ -828,6 +932,26 @@ def _coerce_positive_int(
         return default
     if coerced <= 0:
         warnings.append(f"{field_name} must be > 0. Falling back to {default}.")
+        return default
+    return coerced
+
+
+def _coerce_non_negative_int(
+    value: Any,
+    *,
+    default: int,
+    field_name: str,
+    warnings: list[str],
+) -> int:
+    if value is None:
+        return default
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        warnings.append(f"Invalid {field_name} '{value}'. Falling back to {default}.")
+        return default
+    if coerced < 0:
+        warnings.append(f"{field_name} must be >= 0. Falling back to {default}.")
         return default
     return coerced
 

@@ -15,6 +15,7 @@ from app.pipelines.price_tag_v2.stages.row_fusion import (
     _add_ocr_votes,
     _choose_vote,
     _derive_cross_fields,
+    _qr_price_should_override_visible,
     _stable_symbol_key,
     _sweetness_from_name,
     _to_price,
@@ -84,6 +85,24 @@ def test_price2_qr_falls_back_to_price1_qr() -> None:
            "discount_amount": "x", "price2_qr": "", "product_name": ""}
     _derive_cross_fields(row)
     assert row["price2_qr"] == "3599.99"
+
+
+def test_qr_price_overrides_integer_only_visible_price() -> None:
+    assert _qr_price_should_override_visible(
+        qr_field="price1_qr",
+        qv="3157.89",
+        vv="3157.00",
+    )
+    assert not _qr_price_should_override_visible(
+        qr_field="price1_qr",
+        qv="3157.89",
+        vv="3158.00",
+    )
+    assert not _qr_price_should_override_visible(
+        qr_field="price1_qr",
+        qv="3157.89",
+        vv="3157.49",
+    )
 
 
 def test_additional_info_derived_from_name_only_when_empty() -> None:

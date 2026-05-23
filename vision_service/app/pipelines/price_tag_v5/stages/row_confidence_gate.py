@@ -44,6 +44,8 @@ class RowConfidenceGateConfig:
     keep_price_only_rows: bool
     spatial_dedup_iou: float  # 0 disables; else collapse same-physical-tag rows
     min_confidence: float
+    suppress_weak_when_identity_present: bool
+    identity_present_min_confidence: float
 
     @classmethod
     def from_context(cls, context: PipelineContext) -> "RowConfidenceGateConfig":
@@ -58,7 +60,15 @@ class RowConfidenceGateConfig:
             mode=mode,
             keep_price_only_rows=_bool(raw.get("keep_price_only_rows"), default=True),
             spatial_dedup_iou=_float(raw.get("spatial_dedup_iou"), 0.60),
-            min_confidence=_float(raw.get("min_confidence"), 0.30),
+            min_confidence=_float(raw.get("min_confidence"), 0.40),
+            suppress_weak_when_identity_present=_bool(
+                raw.get("suppress_weak_when_identity_present"),
+                default=True,
+            ),
+            identity_present_min_confidence=_float(
+                raw.get("identity_present_min_confidence"),
+                0.45,
+            ),
         )
 
 
@@ -73,6 +83,10 @@ class V5RowConfidenceGateStage(BaseStage):
             "mode": config.mode,
             "spatial_dedup_iou": config.spatial_dedup_iou,
             "min_confidence": config.min_confidence,
+            "suppress_weak_when_identity_present": (
+                config.suppress_weak_when_identity_present
+            ),
+            "identity_present_min_confidence": config.identity_present_min_confidence,
         }
 
     def run(self, context: PipelineContext) -> StageOutcome:
@@ -93,7 +107,17 @@ class V5RowConfidenceGateStage(BaseStage):
             (index, row, *_gate_decision(row, config))
             for index, row in enumerate(input_rows)
         ]
+        decisions = _apply_identity_present_gate(decisions, config)
         gated = [row for _, row, keep, _reason in decisions if keep]
+        identity_present_gate_active = (
+            config.mode == "balanced"
+            and config.suppress_weak_when_identity_present
+            and any(_has_confirmed_identity(row) for _, row, keep, _ in decisions if keep)
+        )
+        identity_present_suppressed_rows = sum(
+            1 for _, _, keep, reason in decisions
+            if not keep and reason == "below_identity_present_min_confidence"
+        )
 
         deduped, dedup_groups = _spatial_dedup(gated, config.spatial_dedup_iou)
         kept_ids = {id(row) for row in deduped}
@@ -122,11 +146,14 @@ class V5RowConfidenceGateStage(BaseStage):
             ),
             "spatial_dedup_iou": config.spatial_dedup_iou,
             "min_confidence": config.min_confidence,
+            "identity_present_min_confidence": config.identity_present_min_confidence,
+            "identity_present_gate_active": identity_present_gate_active,
             "input_rows": len(input_rows),
             "gated_rows": len(gated),
             "kept_rows": len(kept),
             "suppressed_rows": len(input_rows) - len(gated),
             "deduped_rows": len(gated) - len(kept),
+            "identity_present_suppressed_rows": identity_present_suppressed_rows,
             "catalog_guess_candidates": sum(
                 1 for row in input_rows if has_value(row.get("catalog_guess_name", ""))
             ),
@@ -178,12 +205,15 @@ class V5RowConfidenceGateStage(BaseStage):
             "enabled": True,
             "mode": config.mode,
             "min_confidence": config.min_confidence,
+            "identity_present_min_confidence": config.identity_present_min_confidence,
+            "identity_present_gate_active": identity_present_gate_active,
             "input_rows": len(input_rows),
             "gated_rows": len(gated),
             "kept_rows": len(kept),
             "suppressed_rows": len(input_rows) - len(gated),
             "deduped_rows": len(gated) - len(kept),
             "dedup_groups": dedup_groups,
+            "identity_present_suppressed_rows": identity_present_suppressed_rows,
             "identity_rows": sum(
                 1 for p in provenance if "identity" in p["evidence"]
             ),
@@ -247,8 +277,45 @@ def _gate_decision(
     return True, ""
 
 
+def _apply_identity_present_gate(
+    decisions: list[tuple[int, dict[str, str], bool, str]],
+    config: RowConfidenceGateConfig,
+) -> list[tuple[int, dict[str, str], bool, str]]:
+    if config.mode != "balanced" or not config.suppress_weak_when_identity_present:
+        return decisions
+    if not any(_has_confirmed_identity(row) for _, row, keep, _ in decisions if keep):
+        return decisions
+
+    adjusted: list[tuple[int, dict[str, str], bool, str]] = []
+    for index, row, keep, reason in decisions:
+        if (
+            keep
+            and not _has_confirmed_identity(row)
+            and _is_weak_price_only_row(row)
+            and _row_confidence(row)["confidence"] < config.identity_present_min_confidence
+        ):
+            adjusted.append(
+                (index, row, False, "below_identity_present_min_confidence")
+            )
+        else:
+            adjusted.append((index, row, keep, reason))
+    return adjusted
+
+
 def _has_match_key(row: dict[str, str]) -> bool:
     return any(_trusted_ean13(row.get(field, "")) for field in MATCH_KEY_FIELDS)
+
+
+def _has_confirmed_identity(row: dict[str, str]) -> bool:
+    return _has_match_key(row) and has_value(row.get("product_name", ""))
+
+
+def _is_weak_price_only_row(row: dict[str, str]) -> bool:
+    if _has_match_key(row) or has_value(row.get("product_name", "")):
+        return False
+    if any(_strong_fineprint(row, field) for field in FINEPRINT_EVIDENCE_FIELDS):
+        return False
+    return any(is_price(row.get(field, "")) for field in PRICE_FIELDS)
 
 
 def _side_car_row(
@@ -299,6 +366,7 @@ def _row_confidence(row: dict[str, str]) -> dict[str, Any]:
     score = 0.0
     has_barcode = any(_trusted_ean13(row.get(f, "")) for f in MATCH_KEY_FIELDS)
     has_name = has_value(row.get("product_name", ""))
+    has_inverted_price_pair = _has_inverted_price_pair(row)
     if has_barcode and has_name:
         evidence.append("identity")
         score += 0.40
@@ -311,10 +379,10 @@ def _row_confidence(row: dict[str, str]) -> dict[str, Any]:
     if is_price(row.get("price_card", "")):
         evidence.append("price_card")
         score += 0.15
-    if is_price(row.get("price_default", "")):
+    if is_price(row.get("price_default", "")) and not has_inverted_price_pair:
         evidence.append("price_default")
         score += 0.08
-    if has_value(row.get("discount_amount", "")):
+    if has_value(row.get("discount_amount", "")) and not has_inverted_price_pair:
         evidence.append("discount")
         score += 0.05
     if _strong_fineprint(row, "id_sku"):
@@ -340,6 +408,26 @@ def _row_confidence(row: dict[str, str]) -> dict[str, Any]:
 def _trusted_ean13(value: str | None) -> bool:
     code = to_ean13(re.sub(r"\D+", "", str(value or "")))
     return bool(code and ean13_ok(code))
+
+
+def _has_inverted_price_pair(row: dict[str, str]) -> bool:
+    default = _price_decimal(row.get("price_default"))
+    card = _price_decimal(row.get("price_card"))
+    if default is None or card is None:
+        return False
+    return card > default + Decimal("0.01")
+
+
+def _price_decimal(value: str | None) -> Decimal | None:
+    text = str(value or "").strip().replace(" ", "").replace(",", ".")
+    text = re.sub(r"[^0-9.\-]", "", text)
+    if not text or text in {"-", "."}:
+        return None
+    try:
+        parsed = Decimal(text)
+    except InvalidOperation:
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _fineprint_confidence(row: dict[str, str], field: str) -> float:

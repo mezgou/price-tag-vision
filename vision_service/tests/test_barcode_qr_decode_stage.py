@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
 
 from app.pipelines.base import SampledFrameMetadata
+from app.pipelines.price_tag_cpu_v1.stages import barcode_qr_decode as decode_stage_module
 from app.pipelines.price_tag_cpu_v1.stages.barcode_qr_decode import (
     BarcodeQrDecodeStage,
+    BarcodeQrDecodeConfig,
+    OPTIONAL_ZXINGCPP_DECODER,
+    OPTIONAL_ZXINGCPP_QR_ONLY_DECODER,
+    _cap_crops_per_track,
+    _decode_with_optional_zxingcpp_qr_only,
+    _resolve_decoder_runners,
 )
 from app.schemas.detections import BoundingBox, CropCandidate, CropQuality
+from app.utils.decoding import DecodeVariantImage
 
 
 def test_barcode_qr_decode_stage_handles_empty_crops(
@@ -73,6 +83,7 @@ def test_barcode_qr_decode_stage_handles_crop_without_symbols(
                 score=0.6,
             ),
             source="crop_extraction_v1",
+            attributes={"track_id": "track_qr"},
         )
     ]
 
@@ -135,6 +146,7 @@ def test_barcode_qr_decode_stage_decodes_synthetic_qr_image(
                 score=0.95,
             ),
             source="crop_extraction_v1",
+            attributes={"track_id": "track_qr"},
         )
     ]
 
@@ -146,7 +158,114 @@ def test_barcode_qr_decode_stage_decodes_synthetic_qr_image(
     assert len(pipeline_context.decoded_symbols) >= 1
     assert any(symbol.payload == qr_payload for symbol in pipeline_context.decoded_symbols)
     assert all(symbol.symbol_type == "qr" for symbol in pipeline_context.decoded_symbols)
+    assert {symbol.attributes.get("track_id") for symbol in pipeline_context.decoded_symbols} == {
+        "track_qr"
+    }
     assert len({symbol.payload for symbol in pipeline_context.decoded_symbols}) == 1
+
+
+def test_barcode_qr_decode_caps_crops_per_track() -> None:
+    crops = [
+        _crop(f"crop_{i}", track_id="track_a", score=1.0 - i * 0.01)
+        for i in range(4)
+    ] + [
+        _crop(f"crop_b_{i}", track_id="track_b", score=0.8 - i * 0.01)
+        for i in range(3)
+    ]
+
+    selected = _cap_crops_per_track(crops, max_total=10, max_per_track=2)
+
+    assert [crop.crop_id for crop in selected] == [
+        "crop_0",
+        "crop_1",
+        "crop_b_0",
+        "crop_b_1",
+    ]
+
+
+def test_zxingcpp_qr_only_runner_is_ordered_before_generic_zxingcpp(
+    pipeline_context,
+    monkeypatch,
+) -> None:
+    pipeline_context.config["barcode_qr_decode"] = {
+        "enabled": True,
+        "decoders": {
+            "opencv_qr_detector": {"enabled": False},
+            "optional_zxingcpp_qr_only": {"enabled": True},
+            "optional_zxingcpp": {"enabled": True},
+            "optional_pyzbar": {"enabled": False},
+            "optional_aruco": {"enabled": False},
+        },
+    }
+    config = BarcodeQrDecodeConfig.from_context(pipeline_context)
+    warnings: list[str] = []
+
+    monkeypatch.setattr(
+        decode_stage_module,
+        "find_spec",
+        lambda name: object() if name == "zxingcpp" else None,
+    )
+
+    runners = _resolve_decoder_runners(config=config, warnings=warnings)
+
+    assert [name for name, _ in runners] == [
+        OPTIONAL_ZXINGCPP_QR_ONLY_DECODER,
+        OPTIONAL_ZXINGCPP_DECODER,
+    ]
+    assert warnings == []
+
+
+def test_zxingcpp_qr_only_runner_requests_qr_format(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+    qr_format = object()
+
+    def read_barcodes(image: np.ndarray, **kwargs: object) -> list[SimpleNamespace]:
+        calls.append(kwargs)
+        return [SimpleNamespace(text="qr-payload", format="QRCode")]
+
+    fake_zxingcpp = SimpleNamespace(
+        BarcodeFormat=SimpleNamespace(QRCode=qr_format),
+        read_barcodes=read_barcodes,
+    )
+    monkeypatch.setitem(sys.modules, "zxingcpp", fake_zxingcpp)
+    variant = DecodeVariantImage(
+        name="resized_x3",
+        image=np.zeros((16, 16), dtype=np.uint8),
+        scale_x=3.0,
+        scale_y=3.0,
+    )
+
+    hits = _decode_with_optional_zxingcpp_qr_only(variant)
+
+    assert calls == [
+        {
+            "try_rotate": True,
+            "try_downscale": True,
+            "try_invert": True,
+            "formats": qr_format,
+        }
+    ]
+    assert len(hits) == 1
+    assert hits[0].payload == "qr-payload"
+    assert hits[0].symbol_type == "qr"
+    assert hits[0].attributes == {"format": "qrcode", "qr_only": True}
+
+
+def test_zxingcpp_qr_only_runner_rejects_non_qr_formats(monkeypatch) -> None:
+    def read_barcodes(image: np.ndarray, **kwargs: object) -> list[SimpleNamespace]:
+        return [SimpleNamespace(text="4600000000000", format="EAN13")]
+
+    fake_zxingcpp = SimpleNamespace(
+        BarcodeFormat=SimpleNamespace(QRCode=object()),
+        read_barcodes=read_barcodes,
+    )
+    monkeypatch.setitem(sys.modules, "zxingcpp", fake_zxingcpp)
+    variant = DecodeVariantImage(
+        name="original",
+        image=np.zeros((16, 16), dtype=np.uint8),
+    )
+
+    assert _decode_with_optional_zxingcpp_qr_only(variant) == []
 
 
 def _build_qr_image(payload: str, *, target_size: int) -> np.ndarray:
@@ -155,3 +274,28 @@ def _build_qr_image(payload: str, *, target_size: int) -> np.ndarray:
     qr = encoder.encode(payload)
     qr = cv2.resize(qr, (target_size, target_size), interpolation=cv2.INTER_NEAREST)
     return cv2.cvtColor(qr, cv2.COLOR_GRAY2BGR)
+
+
+def _crop(crop_id: str, *, track_id: str, score: float) -> CropCandidate:
+    bbox = BoundingBox(x_min=0, y_min=0, x_max=10, y_max=10)
+    return CropCandidate(
+        crop_id=crop_id,
+        detection_id=f"det_{crop_id}",
+        frame_index=0,
+        timestamp_ms=0,
+        bbox=bbox,
+        padded_bbox=bbox,
+        crop_key="",
+        width=10,
+        height=10,
+        quality=CropQuality(
+            sharpness=0.0,
+            brightness=0.0,
+            contrast=0.0,
+            glare_ratio=0.0,
+            area_ratio=0.0,
+            score=score,
+        ),
+        source="test",
+        attributes={"track_id": track_id},
+    )

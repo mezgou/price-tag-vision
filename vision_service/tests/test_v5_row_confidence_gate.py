@@ -87,11 +87,47 @@ def test_recall_mode_keeps_every_localized_tag(pipeline_context) -> None:
 
 
 def test_balanced_mode_is_default_and_invalid_mode_fallback(pipeline_context) -> None:
-    assert RowConfidenceGateConfig.from_context(pipeline_context).mode == "balanced"
+    default_config = RowConfidenceGateConfig.from_context(pipeline_context)
+    assert default_config.mode == "balanced"
+    assert default_config.min_confidence == 0.40
+    assert default_config.suppress_weak_when_identity_present is True
+    assert default_config.identity_present_min_confidence == 0.45
 
     pipeline_context.config["v5_row_confidence_gate"] = {"mode": "diagnostic"}
 
     assert RowConfidenceGateConfig.from_context(pipeline_context).mode == "balanced"
+
+
+def test_default_balanced_threshold_prefers_identity_when_present(
+    pipeline_context,
+) -> None:
+    pipeline_context.config["v5_row_confidence_gate"] = {
+        "enabled": True,
+        "mode": "balanced",
+        "spatial_dedup_iou": 0.0,
+    }
+    pipeline_context.csv_rows = [
+        _bbox_row(10, 10, 100, 100, color="red", price_card="1499.99"),
+        _bbox_row(
+            110,
+            10,
+            200,
+            100,
+            color="red",
+            price_card="1499.99",
+            price_default="1899.99",
+            discount_amount="-21%",
+        ),
+        _bbox_row(210, 10, 300, 100, product_name="Wine", barcode="8051070512049"),
+    ]
+
+    outcome = V5RowConfidenceGateStage().run(pipeline_context)
+
+    assert outcome.output_summary["identity_present_gate_active"] is True
+    assert outcome.output_summary["identity_present_suppressed_rows"] == 1
+    assert outcome.output_summary["kept_rows"] == 1
+    assert outcome.output_summary["suppressed_rows"] == 2
+    assert pipeline_context.csv_rows[0]["barcode"] == "8051070512049"
 
 
 def test_balanced_mode_suppresses_low_evidence_localized_rows(pipeline_context) -> None:
@@ -134,6 +170,7 @@ def test_balanced_mode_keeps_confident_evidence_rows(pipeline_context) -> None:
         "enabled": True,
         "mode": "balanced",
         "min_confidence": 0.30,
+        "suppress_weak_when_identity_present": False,
         "spatial_dedup_iou": 0.0,
     }
     pipeline_context.csv_rows = [
@@ -148,6 +185,169 @@ def test_balanced_mode_keeps_confident_evidence_rows(pipeline_context) -> None:
 
     assert outcome.output_summary["kept_rows"] == 5
     assert outcome.output_summary["suppressed_rows"] == 0
+
+
+def test_balanced_mode_raises_price_only_bar_when_confirmed_identity_exists(
+    pipeline_context,
+) -> None:
+    pipeline_context.config["v5_row_confidence_gate"] = {
+        "enabled": True,
+        "mode": "balanced",
+        "spatial_dedup_iou": 0.0,
+    }
+    pipeline_context.csv_rows = [
+        _bbox_row(
+            10,
+            10,
+            100,
+            100,
+            color="red",
+            price_card="1899.99",
+            price_default="2631.00",
+            discount_amount="-27%",
+        ),
+        _bbox_row(
+            110,
+            10,
+            200,
+            100,
+            product_name="Known Wine",
+            barcode="3500610117022",
+            color="red",
+            price_card="1899.99",
+            price_default="2631.00",
+            discount_amount="-27%",
+        ),
+    ]
+
+    outcome = V5RowConfidenceGateStage().run(pipeline_context)
+
+    assert outcome.output_summary["identity_present_gate_active"] is True
+    assert outcome.output_summary["identity_present_suppressed_rows"] == 1
+    assert len(pipeline_context.csv_rows) == 1
+    assert pipeline_context.csv_rows[0]["product_name"] == "Known Wine"
+
+
+def test_balanced_mode_keeps_price_rows_when_no_confirmed_identity_exists(
+    pipeline_context,
+) -> None:
+    pipeline_context.config["v5_row_confidence_gate"] = {
+        "enabled": True,
+        "mode": "balanced",
+        "spatial_dedup_iou": 0.0,
+    }
+    pipeline_context.csv_rows = [
+        _bbox_row(
+            10,
+            10,
+            100,
+            100,
+            color="red",
+            price_card="1899.99",
+            price_default="2631.00",
+            discount_amount="-27%",
+        ),
+        _bbox_row(
+            110,
+            10,
+            200,
+            100,
+            barcode="3500610117022",
+            color="red",
+            price_card="1899.99",
+            price_default="2631.00",
+            discount_amount="-27%",
+        ),
+    ]
+
+    outcome = V5RowConfidenceGateStage().run(pipeline_context)
+
+    assert outcome.output_summary["identity_present_gate_active"] is False
+    assert outcome.output_summary["identity_present_suppressed_rows"] == 0
+    assert len(pipeline_context.csv_rows) == 2
+
+
+def test_identity_present_gate_keeps_match_key_only_rows(pipeline_context) -> None:
+    pipeline_context.config["v5_row_confidence_gate"] = {
+        "enabled": True,
+        "mode": "balanced",
+        "spatial_dedup_iou": 0.0,
+    }
+    pipeline_context.csv_rows = [
+        _bbox_row(
+            10,
+            10,
+            100,
+            100,
+            barcode="3500610117022",
+        ),
+        _bbox_row(
+            110,
+            10,
+            200,
+            100,
+            product_name="Known Wine",
+            barcode="8051070512049",
+        ),
+    ]
+
+    outcome = V5RowConfidenceGateStage().run(pipeline_context)
+
+    assert outcome.output_summary["identity_present_gate_active"] is True
+    assert outcome.output_summary["identity_present_suppressed_rows"] == 0
+    assert len(pipeline_context.csv_rows) == 2
+
+
+def test_balanced_mode_suppresses_inverted_price_pair_without_identity(
+    pipeline_context,
+) -> None:
+    pipeline_context.config["v5_row_confidence_gate"] = {
+        "enabled": True,
+        "mode": "balanced",
+        "spatial_dedup_iou": 0.0,
+        "suppress_weak_when_identity_present": False,
+    }
+    pipeline_context.csv_rows = [
+        _bbox_row(
+            10,
+            10,
+            100,
+            100,
+            color="red",
+            price_card="2749.99",
+            price_default="2526.00",
+            discount_amount="-37%",
+        ),
+        _bbox_row(
+            110,
+            10,
+            200,
+            100,
+            color="red",
+            price_card="1899.99",
+            price_default="2631.00",
+            discount_amount="-27%",
+        ),
+        _bbox_row(
+            210,
+            10,
+            300,
+            100,
+            product_name="Known Wine",
+            barcode="3500610117022",
+            color="red",
+            price_card="2749.99",
+            price_default="2526.00",
+            discount_amount="-37%",
+        ),
+    ]
+
+    outcome = V5RowConfidenceGateStage().run(pipeline_context)
+
+    assert outcome.output_summary["kept_rows"] == 2
+    assert outcome.output_summary["suppressed_rows"] == 1
+    assert all(row.get("x_min") != "10" for row in pipeline_context.csv_rows)
+    assert any(row.get("product_name") == "Known Wine" for row in pipeline_context.csv_rows)
 
 
 def test_balanced_mode_thresholds_single_weak_signals(pipeline_context) -> None:
@@ -266,6 +466,39 @@ def test_confidence_is_monotonic_and_bounded() -> None:
     assert "identity" in identified["evidence"]
     assert identified["tier"] == "high"
     assert bare["tier"] == "low"
+
+
+def test_confidence_does_not_reward_inverted_price_default_or_discount() -> None:
+    valid = _row_confidence(
+        _bbox_row(
+            0,
+            0,
+            10,
+            10,
+            color="red",
+            price_card="1899.99",
+            price_default="2631.00",
+            discount_amount="-27%",
+        )
+    )
+    inverted = _row_confidence(
+        _bbox_row(
+            0,
+            0,
+            10,
+            10,
+            color="red",
+            price_card="2749.99",
+            price_default="2526.00",
+            discount_amount="-37%",
+        )
+    )
+
+    assert "price_default" in valid["evidence"]
+    assert "discount" in valid["evidence"]
+    assert "price_default" not in inverted["evidence"]
+    assert "discount" not in inverted["evidence"]
+    assert inverted["confidence"] < 0.40
 
 
 def test_gate_writes_confidence_side_car(pipeline_context) -> None:

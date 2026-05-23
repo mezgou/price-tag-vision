@@ -6,7 +6,7 @@ from app.pipelines.price_tag_v5.stages import barcode_bars_crop as stage_module
 from app.pipelines.price_tag_v5.stages.barcode_bars_crop import (
     V5BarcodeBarsCropDecodeStage,
 )
-from app.schemas.detections import BoundingBox, CropCandidate, CropQuality
+from app.schemas.detections import BoundingBox, CropCandidate, CropQuality, DecodedSymbol
 
 
 def test_v5_barcode_bars_crop_decode_adds_valid_ean13(
@@ -59,6 +59,78 @@ def test_v5_barcode_bars_crop_decode_rejects_invalid_ean13(
 
     assert outcome.output_summary["hits"] == 0
     assert pipeline_context.decoded_symbols == []
+
+
+def test_v5_barcode_bars_crop_skips_when_code_evidence_already_exists(
+    pipeline_context,
+) -> None:
+    pipeline_context.crop_candidates = [_crop()]
+    pipeline_context.config["v5_barcode_bars_decode"] = {
+        "enabled": True,
+        "skip_if_code_evidence_present": True,
+    }
+    pipeline_context.decoded_symbols = [
+        DecodedSymbol(
+            symbol_id="sym_1",
+            crop_id="crop_1",
+            detection_id="det_1",
+            frame_index=0,
+            timestamp_ms=0,
+            symbol_type="barcode",
+            decoder="zxingcpp",
+            variant="resized_x3",
+            payload="8051070512049",
+            confidence=0.9,
+            attributes={"track_id": "track_1"},
+        )
+    ]
+
+    outcome = V5BarcodeBarsCropDecodeStage().run(pipeline_context)
+
+    assert outcome.output_summary["crops_processed"] == 0
+    assert outcome.output_summary["crops_skipped_by_code_evidence"] == 1
+    assert outcome.output_summary["tracks_skipped_by_code_evidence"] == 1
+
+
+def test_v5_barcode_bars_crop_does_not_skip_qr_without_safe_ean(
+    pipeline_context,
+    monkeypatch,
+) -> None:
+    pipeline_context.crop_candidates = [_crop()]
+    pipeline_context.config["v5_barcode_bars_decode"] = {
+        "enabled": True,
+        "skip_if_code_evidence_present": True,
+    }
+    pipeline_context.decoded_symbols = [
+        DecodedSymbol(
+            symbol_id="sym_1",
+            crop_id="crop_1",
+            detection_id="det_1",
+            frame_index=0,
+            timestamp_ms=0,
+            symbol_type="qr",
+            decoder="zxingcpp",
+            variant="resized_x3",
+            payload="p1=123.00;p4=99.99",
+            confidence=0.9,
+            attributes={"track_id": "track_1"},
+        )
+    ]
+    monkeypatch.setattr(
+        stage_module,
+        "_load_crop_image",
+        lambda *, crop, frame_lookup: np.zeros((80, 160, 3), dtype=np.uint8),
+    )
+    monkeypatch.setattr(stage_module, "_barcode_band", lambda image: image)
+    monkeypatch.setattr(stage_module, "_barcode_variants", lambda image: [("fake", image)])
+    monkeypatch.setattr(stage_module, "_decode_zxingcpp", lambda image: [])
+    monkeypatch.setattr(stage_module, "_decode_pyzbar", lambda image: [])
+    monkeypatch.setattr(stage_module, "_decode_signal", lambda image: [])
+
+    outcome = V5BarcodeBarsCropDecodeStage().run(pipeline_context)
+
+    assert outcome.output_summary["crops_processed"] == 1
+    assert outcome.output_summary["crops_skipped_by_code_evidence"] == 0
 
 
 def _crop() -> CropCandidate:

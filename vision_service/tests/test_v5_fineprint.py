@@ -1,13 +1,13 @@
 """Unit coverage for the v5 fine-print extractor (id_sku/datetime/code).
 
-These three fields gate the metric (oracle: recovering them lifts
-26_12-20 score 0.014 -> 0.96). Consensus must reconstruct the exact SKU
+These three fields strongly affect the metric. Consensus must reconstruct the exact SKU
 from several noisy reads of the same static value.
 """
 from __future__ import annotations
 
 from app.pipelines.price_tag_v5.stages.block_ocr_catalog import (
     V5BlockOcrCatalogStage as S,
+    _Cfg,
 )
 
 
@@ -99,3 +99,14 @@ def test_mode_with_support_requires_repeated_code() -> None:
         )
         == "01_026015 - 026016"
     )
+
+
+def test_fineprint_budget_is_configurable(pipeline_context) -> None:
+    pipeline_context.config["v5_block_ocr"] = {
+        "enabled": True,
+        "fineprint_per_track": 2,
+    }
+
+    cfg = _Cfg.from_context(pipeline_context)
+
+    assert cfg.fineprint_per_track == 2

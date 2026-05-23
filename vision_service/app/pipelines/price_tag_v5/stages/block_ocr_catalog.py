@@ -162,6 +162,16 @@ def _digit_runs(text: str) -> list[str]:
     return [value for value in candidates if value]
 
 
+def _safe_price_float(value: str | None) -> float | None:
+    text = str(value or "").strip().replace(" ", "").replace(",", ".")
+    text = re.sub(r"[^0-9.\-]", "", text)
+    try:
+        parsed = float(text)
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
+
+
 def _catalog_match_record(
     track_id: str,
     match: CatalogMatch | None,
@@ -242,6 +252,7 @@ class _Cfg:
     category: str
     db_path: str
     best_effort_name: bool
+    fineprint_per_track: int
 
     @classmethod
     def from_context(cls, ctx: PipelineContext) -> "_Cfg":
@@ -255,6 +266,7 @@ class _Cfg:
             category=str(raw.get("category", "wine")),
             db_path=str(raw.get("db_path", "data/db_hack.csv")),
             best_effort_name=bool(raw.get("best_effort_name", True)),
+            fineprint_per_track=max(int(raw.get("fineprint_per_track", 6) or 0), 0),
         )
 
 
@@ -315,11 +327,23 @@ class V5BlockOcrCatalogStage(BaseStage):
         for poly, txt, conf in items:
             if poly is None or poly.size == 0 or not str(txt).strip():
                 continue
+            xs = poly[:, 0]
             ys = poly[:, 1]
             rel_h = float(ys.max() - ys.min()) / float(H)
             rel_y = float(ys.min()) / float(H)
-            blocks.append({"text": str(txt), "conf": conf,
-                           "rel_h": rel_h, "rel_y": rel_y})
+            rel_x = float(xs.min()) / float(max(img.shape[1], 1))
+            rel_w = float(xs.max() - xs.min()) / float(max(img.shape[1], 1))
+            blocks.append(
+                {
+                    "text": str(txt),
+                    "conf": conf,
+                    "rel_h": rel_h,
+                    "rel_y": rel_y,
+                    "rel_x": rel_x,
+                    "rel_w": rel_w,
+                    "rel_cx": rel_x + rel_w / 2.0,
+                }
+            )
         return blocks
 
     @staticmethod
@@ -336,26 +360,226 @@ class V5BlockOcrCatalogStage(BaseStage):
                     "69", "89", "29", "19")
 
     @staticmethod
-    def _price_ints(nums: list[dict]) -> list[int]:
-        out: list[int] = []
+    def _price_ints(nums: list[dict]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
         for b in nums:
             for tok in re.findall(r"\d+", b["text"]):
                 if 3 <= len(tok) <= 5:
-                    v = int(tok)
-                    if 100 <= v <= 99999:
-                        out.append(v)
+                    values = [(int(tok), 1.0, "raw")]
+                    if (
+                        len(tok) == 5
+                        and tok.endswith("0")
+                        and 0.12 <= float(b.get("rel_y", 0.5)) <= 0.56
+                    ):
+                        values.append((int(tok[:-1]), 0.88, "trimmed_trailing_zero"))
+                    for v, confidence_scale, source in values:
+                        if not 100 <= v <= 99999:
+                            continue
+                        rel_x = float(b.get("rel_x", 0.45))
+                        rel_w = float(b.get("rel_w", 0.18))
+                        out.append(
+                            {
+                                "value": v,
+                                "rel_y": float(b.get("rel_y", 0.5)),
+                                "rel_h": float(b.get("rel_h", 0.05)),
+                                "rel_x": rel_x,
+                                "rel_w": rel_w,
+                                "rel_cx": float(b.get("rel_cx", rel_x + rel_w / 2.0)),
+                                "conf": float(b.get("conf", 0.0)) * confidence_scale,
+                                "source": source,
+                            }
+                        )
         return out
 
     @classmethod
     def _card_kopecks(cls, nums: list[dict]) -> str:
-        twos = [
-            t for b in nums
-            for t in re.findall(r"(?<!\d)\d{2}(?!\d)", b["text"])
-        ]
-        for pref in cls._KOPECK_PREF:
-            if pref in twos:
-                return pref
-        return "99"
+        return cls._kopecks_for_price(nums, price_entry=None, fallback="99")
+
+    @staticmethod
+    def _two_digit_entries(nums: list[dict]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for block in nums:
+            text = str(block.get("text", ""))
+            for token in re.findall(r"(?<!\d)\d{2}(?!\d)", text):
+                rel_x = float(block.get("rel_x", 0.62))
+                rel_w = float(block.get("rel_w", 0.08))
+                out.append(
+                    {
+                        "value": token,
+                        "rel_y": float(block.get("rel_y", 0.5)),
+                        "rel_x": rel_x,
+                        "rel_w": rel_w,
+                        "rel_cx": float(block.get("rel_cx", rel_x + rel_w / 2.0)),
+                    }
+                )
+        return out
+
+    @classmethod
+    def _kopecks_for_price(
+        cls,
+        nums: list[dict],
+        *,
+        price_entry: dict[str, Any] | None,
+        fallback: str,
+        excluded: set[str] | None = None,
+    ) -> str:
+        excluded = excluded or set()
+        candidates: list[tuple[float, str]] = []
+        for entry in cls._two_digit_entries(nums):
+            token = str(entry["value"])
+            if token in excluded:
+                continue
+            if price_entry is None:
+                if token in cls._KOPECK_PREF:
+                    candidates.append((float(cls._KOPECK_PREF.index(token)), token))
+                continue
+            y_distance = abs(float(entry["rel_y"]) - float(price_entry["rel_y"]))
+            price_left = float(price_entry.get("rel_x", 0.45))
+            price_right = price_left + float(price_entry.get("rel_w", 0.18))
+            if token not in cls._KOPECK_PREF and float(entry.get("rel_x", 0.62)) + 0.02 < price_left:
+                continue
+            x_distance = abs(float(entry.get("rel_x", 0.62)) - price_right)
+            if float(entry.get("rel_x", 0.62)) + 0.03 < price_right:
+                x_distance += 0.12
+            candidates.append((y_distance + min(x_distance, 0.20), token))
+        if not candidates:
+            return fallback
+        distance, token = min(candidates, key=lambda item: item[0])
+        return token if distance <= 0.24 else fallback
+
+    @staticmethod
+    def _discount_from_prices(default_price: str, card_price: str) -> str:
+        default = _safe_price_float(default_price)
+        card = _safe_price_float(card_price)
+        if default is None or card is None or default <= card:
+            return ""
+        pct = int(round((default - card) / default * 100.0))
+        return f"-{pct}%" if 1 <= pct <= 99 else ""
+
+    @classmethod
+    def _reconcile_discount(
+        cls,
+        discount: str,
+        *,
+        default_price: str,
+        card_price: str,
+    ) -> str:
+        derived = cls._discount_from_prices(default_price, card_price)
+        if not discount or not derived:
+            return discount
+        observed_digits = re.sub(r"\D+", "", discount)
+        derived_digits = re.sub(r"\D+", "", derived)
+        if (
+            len(observed_digits) == 1
+            and derived_digits
+            and abs(int(observed_digits) - int(derived_digits)) >= 10
+        ):
+            return derived
+        return discount
+
+    @staticmethod
+    def _special_symbol_from_block(block: dict) -> str:
+        if float(block.get("rel_y", 0.0)) <= 0.70:
+            return ""
+        text = re.sub(r"\s+", "", str(block.get("text", ""))).upper()
+        if text in {"К", "K", "Ш", "Л"}:
+            return "К" if text in {"К", "K"} else text
+        if re.fullmatch(r"[KК][O0О]?", text):
+            return "К"
+        return ""
+
+    @staticmethod
+    def _additional_info_from_blocks(blocks: list[dict]) -> str:
+        text = re.sub(r"\s+", "", " ".join(str(b.get("text", "")) for b in blocks)).casefold()
+        if not text:
+            return ""
+        if (
+            "полуслад" in text
+            or "п/сл" in text
+            or "п.сл" in text
+            or "p/cл" in text
+            or "n/cл" in text
+        ):
+            return "Полусладкое"
+        if (
+            "полусух" in text
+            or "п/сух" in text
+            or "п.сух" in text
+            or "p/cyx" in text
+            or "n/cyx" in text
+            or "p.cyx" in text
+            or "n.cyx" in text
+        ):
+            return "Полусухое"
+        if "сух" in text or "cyxoe" in text or "cyx" in text:
+            return "Сухое"
+        if "слад" in text:
+            return "Сладкое"
+        if "брют" in text or "brut" in text:
+            return "Брют"
+        return ""
+
+    @staticmethod
+    def _default_kopecks(
+        nums: list[dict],
+        *,
+        default_y: float,
+        card_kopecks: str,
+    ) -> str:
+        candidates: list[tuple[float, str]] = []
+        for block in nums:
+            text = str(block.get("text", ""))
+            for token in re.findall(r"(?<!\d)\d{2}(?!\d)", text):
+                if token == card_kopecks:
+                    continue
+                candidates.append((abs(float(block.get("rel_y", 0.5)) - default_y), token))
+        if not candidates:
+            return "00"
+        candidates.sort(key=lambda item: item[0])
+        distance, token = candidates[0]
+        return token if distance <= 0.16 else "00"
+
+    @staticmethod
+    def _select_price_pair(
+        entries: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        pairs: list[tuple[float, dict[str, Any], dict[str, Any]]] = []
+        for default_entry in entries:
+            default_value = int(default_entry["value"])
+            default_y = float(default_entry["rel_y"])
+            for card_entry in entries:
+                card_value = int(card_entry["value"])
+                if card_value >= default_value:
+                    continue
+                if not (0.30 * default_value <= card_value <= 0.985 * default_value):
+                    continue
+                card_y = float(card_entry["rel_y"])
+                gap = card_y - default_y
+                if not (0.08 <= gap <= 0.58):
+                    continue
+                center_delta = abs(
+                    float(default_entry.get("rel_cx", 0.5))
+                    - float(card_entry.get("rel_cx", 0.5))
+                )
+                score = (
+                    abs(default_y - 0.30) * 2.6
+                    + abs(card_y - 0.62) * 2.4
+                    + abs(gap - 0.30) * 1.8
+                    + center_delta * 0.8
+                    + max(card_y - 0.84, 0.0) * 7.0
+                    + max(default_y - 0.58, 0.0) * 6.0
+                )
+                pairs.append((score, default_entry, card_entry))
+        if pairs:
+            _score, default_entry, card_entry = min(pairs, key=lambda item: item[0])
+            return default_entry, card_entry
+        if not entries:
+            return None, None
+        card_entry = max(
+            entries,
+            key=lambda item: (float(item.get("rel_h", 0.0)), int(item["value"])),
+        )
+        return None, card_entry
 
     @staticmethod
     def _prices_from_blocks(blocks: list[dict]) -> dict[str, str]:
@@ -364,7 +588,12 @@ class V5BlockOcrCatalogStage(BaseStage):
             b for b in blocks
             if re.search(r"\d", b["text"]) and "%" not in b["text"]
             and not re.search(r"\d[\s.,]*(L|Л|ML|МЛ)\b", b["text"].upper())
-            and not re.fullmatch(r"\s*[01][.,]?\d{1,2}\s*[lLлЛ]?\s*", b["text"])
+            and not re.fullmatch(r"\s*[01][.,]\d{1,2}\s*[lLлЛ]?\s*", b["text"])
+        ]
+        nums = [
+            b
+            for b in nums
+            if not re.search(r"\d+\s*(?:g|kg|г|кг)\b", b["text"], re.IGNORECASE)
         ]
         out: dict[str, str] = {}
         # Domain invariant beats fragile font-height geometry: the two main
@@ -373,40 +602,65 @@ class V5BlockOcrCatalogStage(BaseStage):
         # always, and the card price always ends in .99. Picking by tallest
         # block was selecting the struck default integer as the card price
         # (price_card+price4_qr both wrong); reconcile by value instead.
-        ints = sorted(set(V5BlockOcrCatalogStage._price_ints(nums)),
-                      reverse=True)
-        if ints:
-            default_int: int | None = ints[0]
-            card_int = next(
-                (v for v in ints[1:]
-                 if 0.30 * default_int <= v <= 0.985 * default_int),
-                None,
+        price_int_entries = V5BlockOcrCatalogStage._price_ints(nums)
+        unique_ints: dict[int, dict[str, Any]] = {}
+        for entry in price_int_entries:
+            value = int(entry["value"])
+            current = unique_ints.get(value)
+            if current is None or float(entry.get("conf", 0.0)) > float(current.get("conf", 0.0)):
+                unique_ints[value] = entry
+        if unique_ints:
+            default_entry, card_entry = V5BlockOcrCatalogStage._select_price_pair(
+                list(unique_ints.values())
             )
-            if card_int is None:
+            if card_entry is None:
+                return out
+            card_int = int(card_entry["value"])
+            if default_entry is None:
                 # only one dominant price visible -> it is the prominent
                 # card price; default is then unread (kopecks anyway are
                 # sub-resolvable, so emitting a wrong default helps nothing)
-                card_int, default_int = default_int, None
-            pc = f"{card_int}.{V5BlockOcrCatalogStage._card_kopecks(nums)}"
+                default_int = None
+            else:
+                default_int = int(default_entry["value"])
+            card_kopecks = V5BlockOcrCatalogStage._kopecks_for_price(
+                nums,
+                price_entry=card_entry,
+                fallback=V5BlockOcrCatalogStage._card_kopecks(nums),
+            )
+            pc = f"{card_int}.{card_kopecks}"
             if V5BlockOcrCatalogStage._plausible_price(pc):
                 out["price_card"] = pc
-            if default_int is not None:
-                pd = f"{default_int}.00"
+            if default_int is not None and default_entry is not None:
+                default_kopecks = V5BlockOcrCatalogStage._kopecks_for_price(
+                    nums,
+                    price_entry=default_entry,
+                    fallback="00",
+                    excluded={card_kopecks},
+                )
+                pd = f"{default_int}.{default_kopecks}"
                 if (V5BlockOcrCatalogStage._plausible_price(pd)
                         and pd != out.get("price_card")):
                     out["price_default"] = pd
         disc = _best_discount(" ".join(b["text"] for b in blocks))
+        disc = V5BlockOcrCatalogStage._reconcile_discount(
+            disc,
+            default_price=out.get("price_default", ""),
+            card_price=out.get("price_card", ""),
+        )
         if disc:
             out["discount_amount"] = disc
         for b in blocks:
-            t = b["text"].strip().upper()
-            if t in ("К", "K", "Ш", "Л") and b["rel_y"] > 0.7:
-                out["special_symbols"] = "К" if t in ("К", "K") else t
+            symbol = V5BlockOcrCatalogStage._special_symbol_from_block(b)
+            if symbol:
+                out["special_symbols"] = symbol
+        additional_info = V5BlockOcrCatalogStage._additional_info_from_blocks(blocks)
+        if additional_info:
+            out["additional_info"] = additional_info
         return out
 
     # ---- fine print: id_sku / print_datetime / code ---------------------
-    # These three gate almost the whole metric (oracle: recovering them
-    # lifts score 0.014 -> 0.96 on 26_12-20) yet sit in the smallest text on
+    # These fields strongly affect the score yet sit in the smallest text on
     # the tag. The full-crop pass at upscale 3 misses them, so OCR a high-
     # upscale bottom strip too, then take a multi-crop consensus per track
     # (the SKU/date/code are static — many noisy reads of the same value ->
@@ -552,11 +806,11 @@ class V5BlockOcrCatalogStage(BaseStage):
         sku_pool: dict[str, list[str]] = {}
         date_pool: dict[str, list[str]] = {}
         code_pool: dict[str, list[str]] = {}
+        fineprint_raw: dict[str, list[dict[str, Any]]] = {}
         # fine-print OCR is the slow extra pass; only run it on the sharpest
         # crops per track (SKU/date/code are static -> a few good reads, then
         # consensus). Budget keeps total runtime close to the 1-pass version.
         fine_seen: dict[str, int] = {}
-        FINE_PER_TRACK = 6
         for crop in crops:
             img = _load_crop_image(crop=crop, frame_lookup=frame_lookup)
             if img is None:
@@ -574,9 +828,24 @@ class V5BlockOcrCatalogStage(BaseStage):
             pooled.setdefault(tk, []).extend(b["text"] for b in blocks)
 
             texts = [b["text"] for b in blocks]
-            if fine_seen.get(tk, 0) < FINE_PER_TRACK:
+            if fine_seen.get(tk, 0) < cfg.fineprint_per_track:
                 fine_seen[tk] = fine_seen.get(tk, 0) + 1
-                texts = texts + self._fineprint_texts(img)
+                raw_fineprint_texts = self._fineprint_texts(img)
+                fineprint_raw.setdefault(tk, []).append(
+                    {
+                        "crop_id": crop.crop_id,
+                        "zone": "bottom_strip",
+                        "engine": "v5_block_paddle_en",
+                        "variant": "upscale_7",
+                        "raw_text": raw_fineprint_texts,
+                        "parsed_candidates": {
+                            "id_sku": self._sku_candidates(raw_fineprint_texts),
+                            "print_datetime": self._date_candidates(raw_fineprint_texts),
+                            "code": self._code_candidates(raw_fineprint_texts),
+                        },
+                    }
+                )
+                texts = texts + raw_fineprint_texts
                 # NOTE: a dedicated name-band pass (_namestrip_texts) was
                 # measured (tools/nameband_probe.py): ZERO extra catalog
                 # accepts (5/14 -> 5/14), +70% OCR time. The distinctive
@@ -599,6 +868,7 @@ class V5BlockOcrCatalogStage(BaseStage):
         best_effort = 0
         catalog_matches: list[dict[str, Any]] = []
         fineprint_matches: list[dict[str, Any]] = []
+        fineprint_candidates: list[dict[str, Any]] = []
         for tk, texts in pooled.items():
             decoded_barcode_hint = _best_barcode_hint(decoded_hints.get(tk, []))
             ocr_barcode_hint = _best_barcode_hint([], fallback=hint.get(tk, ""))
@@ -658,23 +928,42 @@ class V5BlockOcrCatalogStage(BaseStage):
                     "code_candidates": len(code_pool.get(tk, [])),
                 }
             )
+            accepted_fields: dict[str, str] = {}
             if sku["value"]:
                 ident["id_sku"] = sku["value"]
                 ident["id_sku_source"] = f"v5_fineprint_{sku['method']}"
                 ident["id_sku_confidence"] = sku["confidence"]
                 ident["id_sku_candidates_count"] = sku["candidates"]
+                accepted_fields["id_sku"] = sku["value"]
             dt = self._mode_with_support(date_pool.get(tk, []), min_count=2)
             if dt:
                 ident["print_datetime"] = dt
                 ident["print_datetime_source"] = "v5_fineprint_exact_majority"
                 ident["print_datetime_confidence"] = "0.82"
                 ident["print_datetime_candidates_count"] = str(len(date_pool.get(tk, [])))
+                accepted_fields["print_datetime"] = dt
             code = self._mode_with_support(code_pool.get(tk, []), min_count=2)
             if code:
                 ident["code"] = code
                 ident["code_source"] = "v5_fineprint_exact_majority"
                 ident["code_confidence"] = "0.84"
                 ident["code_candidates_count"] = str(len(code_pool.get(tk, [])))
+                accepted_fields["code"] = code
+            fineprint_candidates.append(
+                {
+                    "track_id": tk,
+                    "raw_reads": fineprint_raw.get(tk, []),
+                    "pooled_candidates": {
+                        "id_sku": sku_pool.get(tk, []),
+                        "print_datetime": date_pool.get(tk, []),
+                        "code": code_pool.get(tk, []),
+                    },
+                    "accepted": accepted_fields,
+                    "rejected_reason": (
+                        "" if accepted_fields else "insufficient_repeated_support"
+                    ),
+                }
+            )
             if ident:
                 identity[tk] = ident
 
@@ -720,6 +1009,19 @@ class V5BlockOcrCatalogStage(BaseStage):
                 )
             except Exception:  # noqa: BLE001 - debug artifact must not break e2e
                 fineprint_matches_key = ""
+        fineprint_candidates_key = ""
+        if fineprint_candidates:
+            try:
+                fineprint_candidates_key = ctx.artifact_writer.upload_json(
+                    "debug/fineprint_candidates.json",
+                    {
+                        "tracks": len(pooled),
+                        "fineprint_per_track": cfg.fineprint_per_track,
+                        "matches": fineprint_candidates,
+                    },
+                )
+            except Exception:  # noqa: BLE001 - debug artifact must not break e2e
+                fineprint_candidates_key = ""
         summary = {
             "enabled": True,
             "crops_ocred": len(per_crop),
@@ -730,6 +1032,7 @@ class V5BlockOcrCatalogStage(BaseStage):
             "catalog_guess_tracks": best_effort,
             "catalog_matches_key": catalog_matches_key,
             "fineprint_matches_key": fineprint_matches_key,
+            "fineprint_candidates_key": fineprint_candidates_key,
             "tracks_with_decoded_barcode_hint": sum(
                 1 for tk in pooled if decoded_hints.get(tk)
             ),

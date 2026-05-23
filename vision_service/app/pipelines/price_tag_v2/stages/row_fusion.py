@@ -361,6 +361,8 @@ def _fuse_group_to_row(
             row[visible_field] = qv
         elif _has_value(vv) and not _has_value(qv):
             row[qr_field] = vv
+        elif _qr_price_should_override_visible(qr_field=qr_field, qv=qv, vv=vv):
+            row[visible_field] = str(qv)
 
     _derive_cross_fields(row)
 
@@ -393,6 +395,25 @@ def _to_price(value: str | None) -> float | None:
     except ValueError:
         return None
     return result if result > 0 else None
+
+
+def _qr_price_should_override_visible(
+    *,
+    qr_field: str,
+    qv: str | None,
+    vv: str | None,
+) -> bool:
+    if qr_field not in PRICE_FIELDS:
+        return False
+    qr_price = _to_price(qv)
+    visible_price = _to_price(vv)
+    if qr_price is None or visible_price is None:
+        return False
+    if int(qr_price) != int(visible_price):
+        return False
+    visible_fraction = abs(visible_price - int(visible_price))
+    qr_fraction = abs(qr_price - int(qr_price))
+    return visible_fraction <= 0.005 and qr_fraction > 0.005
 
 
 _SWEETNESS_RULES: tuple[tuple[str, str], ...] = (
